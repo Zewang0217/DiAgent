@@ -1,6 +1,6 @@
 # TypeScript DiAgent 架构设计
 
-2026-11-12。设计基于 DiOS `f2433d9`、独立 DiAgent `12190ee`、DiOS 内嵌 DiAgent `5e22fb3`。首个 Docker PoC 建议以 npm 版本页均列出的 `0.2.2-rc.1` 为候选基线。 [DSH npm 版本](https://www.npmjs.com/package/%40deepseek-ai/dsh?activeTab=versions) · [SDK npm 版本](https://www.npmjs.com/package/%40deepseek-ai/dsh-sdk-client?activeTab=versions)
+本文用于设计 DiAgent 的运行入口、默认配置和插件装配。当前锁定的 DSH 版本以 [package.json](../package.json) 为准，已验收的行为见 [v0.1 待办](TODO.md)。
 
 首个目标是让一条现有 DiOS task 通过更换镜像切到 TypeScript DiAgent。第二个目标是接通常驻 Chat service。DiAgent 同时面向其他项目和外部调度器，任务执行、状态和产物契约可独立使用。
 
@@ -10,55 +10,46 @@
 
 **Git 里提交 DiAgent 源码、HQIT 插件、profile、Dockerfile 和依赖锁；镜像里安装可运行的 DSH。** 首选精确版本的 `@deepseek-ai/dsh` 和 `@deepseek-ai/dsh-sdk-client`。SDK 默认解析同版本的 DSH 可执行文件，也可以通过 `dshBin` 指向随镜像安装的版本。若 npm 制品无法在目标 Linux 镜像运行，可在镜像构建阶段检出固定的上游提交，构建运行产物并显式指定路径。引入长期维护的上游源码分支需要有具体的上游缺口作为依据。 [SDK 运行时解析](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.1/packages/sdk/client/README.md#known-limitations-and-deferred-work)
 
-**外部调度器可以直接使用一次性任务入口，传入 `TASK_CONFIG`，再读取退出状态和结果文件。** 后续增加独立的任务提交入口，复用同一套执行逻辑，对外提供运行标识、状态和结果。HTTP 是候选方式，接口字段在对应任务中定稿。DiOS 的事件路由和鉴权属于 DiOS 集成。独立运行的验收场景使用外部调用方自配的模型、工具和工作区，在无 DiOS 的环境中完成一次任务。
+**外部调度器可直接调用 `TASK_CONFIG` 入口，也可通过宿主机的独立任务 API 提交、查状态和取结果。** 独立 API 为每次任务启动容器。DiOS 集成继续沿用已有任务文件和 HTTP/SSE 契约。 [独立任务 HTTP 接口](../README.md#独立任务-http-接口)
 
-### 图 1 · 运行架构
-
-```mermaid
-flowchart LR
-    U["Console / 事件 / A2A"] --> OS["DiOS · 调度、容器、状态与授权"]
-    EXT["其他项目 / 外部调度器"]
-    subgraph BOX["DiAgent Docker 容器"]
-        TASK["Task 入口"]
-        HTTP["HTTP / SSE 入口"]
-        SUBMIT["独立任务提交入口 · 拟议"]
-        CFG["配置解析"]
-        RUN["DSH 运行模块"]
-        SDK["官方 TS SDK"]
-        subgraph CHILD["DSH 子进程"]
-            CORE["Agent 循环、工具、会话"]
-            PLUG["HQIT 插件 · publish_event"]
-            CORE --> PLUG
-        end
-        TASK --> CFG
-        HTTP --> CFG
-        SUBMIT -.-> CFG
-        CFG --> RUN
-        RUN <--> SDK
-        SDK <-->|"stdio JSON-RPC"| CORE
-    end
-    OS -->|"TASK_CONFIG"| TASK
-    OS <-->|"HTTP / SSE"| HTTP
-    TASK -->|"结果文件与日志"| OS
-    EXT <-->|"任务配置、退出状态与产物"| TASK
-    EXT -.-> SUBMIT
-    CORE --> MODEL["现有模型端点"]
-    CORE --> MCP["调用方配置的 MCP / 网关"]
-    PLUG -->|"DiOS 事件发布"| OS
-```
+运行架构和共享装配顺序见 [系统与组件 UML](2026-11-diagent-v0.1-system-diagrams.md)。
 
 ## 2. 模块拆分
 
-第一版在 DiAgent 仓库中维护 Cordis 插件，随镜像和锁定的 DSH 版本一起交付。Task 与 service 可共用插件和 DSH 启动逻辑，各入口按自己的工具选择规则装配。镜像保留各自的入口，方便沿用 DiOS 的两种容器启动方式。
+目标设计采用一种 Agent。Task 与 HTTP 是调用入口，一次任务和一次对话共用 `runDshTurn`。当前两张镜像的运行层相同，各入口仍各自组装 profile。下一步先统一装配，独立验收后再决定是否合并镜像入口。
+
+### 基础与两种默认配置
+
+每次运行依次合并 **基础 → 调用方式默认项 → 部署方或 DiOS 为本次运行授权的能力**。基础默认没有模型可见的业务工具。下表中的插件 ID 指向当前已有的实现，表中组合是下一阶段的设计。
+
+| 配置 | 加载的运行插件 | 入口职责与默认权限 |
+| --- | --- | --- |
+| 初始基础 | `llm-pi-ai` 接模型，`system-prompt` 注入角色，`diagent-task-temperature` 传递模型温度。允许列表校验由两个入口共用，现有 `diagent-chat-tool-selection` 可作为实现参考。 | 完成纯文本运行，默认只读，模型可见工具列表为空。 |
+| 一次性任务默认 | 有工具轮次预算时追加 `diagent-tool-round-limit`。 | 入口准备工作区、产物目录，管理超时、日志和退出码。入口可以写日志和最终结果，Agent 写文件所需的工具与权限仍按本次授权配置。 |
+| 常驻对话默认 | 请求携带历史时追加 `diagent-chat-history`。纯文本 SSE 需要逐段输出时追加 `diagent-chat-stream`。 | HTTP 入口返回 JSON 或 SSE。带工具的运行通过事件映射输出工具进度。每轮单独解析模型、上下文和权限，容器可以复用。 |
+
+两个默认配置均可按授权追加以下能力。
+
+| 能力 | 插件或加载项 |
+| --- | --- |
+| 文件访问 | DSH 文件工具按读、写分别授权。工具列表和工作区权限都应匹配授权。 |
+| Skills | `skill-filesystem` 只发现本次获准的目录，并开放所需的 Skill 工具。 |
+| MCP | `@deepseek-ai/dsh-mcp-client` 接指定服务。工具范围由 MCP 网关或本地工具白名单限制。 |
+| Shell | `bash-sandbox`、`tool-bash` 和旧接口适配 `diagent-legacy-shell`。 |
+| 业务事件 | `diagent-publish-event`，附带本次允许的事件发布凭据。 |
+
+初期由 DiAgent 内置这两套默认配置。后续 DiOS 可以新增、保存和分配业务配置，配置引用已部署的插件 ID、参数和资源。DiAgent 按同一规则解析组合，未知插件 ID 或超出授权的能力返回明确错误。
+
+迁移时先用旧入口的兼容映射覆盖已验收的行为。例如旧 task 入口仍有默认启用事件的约定，切换到零业务工具的基础前要把这项能力显式写入旧调用的配置。先验证纯文本请求工具列表为空，再用同一个镜像分别运行任务与 Chat，确认两边都只看到各自授权的工具。
 
 | 模块 | 负责的行为与接口 | 代码位置建议 |
 | --- | --- | --- |
 | Task 入口 | 读 `TASK_CONFIG`，校验 once 配置，调用运行模块，原子写结果和日志，把成功、失败和中断映射为进程退出状态。 | `src/task/` |
 | HTTP 入口 | 提供 `/health`、`/v1/chat/completions`，解析现有字段，映射普通 JSON、SSE、工具事件和错误。负责 HTTP 生命周期。 | `src/service/` |
 | 配置 | 解析现有模型配置、角色提示、workspace、Skills、MCP、工具白名单与预算，生成本次启动所需的 DSH 配置。只把明确兼容的字段映射过去。 | `src/config/` |
-| DSH 运行模块 | 对 task 提供一次运行及最终结果，对 service 提供会话句柄和运行事件。内部管理 SDK 初始化、通知订阅、根/子会话归属、等待终态、截止时间及子进程清理。 | `src/dsh/` |
-| HQIT 插件 | 在 DSH 进程注册 `publish_event`，保留原有工具名与参数，按事件目录和来源规则检查后提交，返回 DiOS 处理结果。Task profile 默认加载插件，部署可关闭。 | `src/dsh/plugins/` |
-| 运行配置与打包 | 固定 SDK、DSH、Node、插件及依赖。维护一套基础 profile 和 task/service 的必要差异，验证最终生效的插件列表。 | `profiles/`、`docker/`、`pnpm-lock.yaml` |
+| DSH 运行模块 | 执行一次 DSH 会话，管理 SDK 初始化、通知订阅、终态、截止时间及子进程清理。调用方消费最终结果和运行事件。 | `src/dsh/` |
+| DiAgent 插件 | 实现业务工具和协议适配，按每次运行的生效配置加载。 | `src/dsh/plugins/` |
+| 运行配置与打包 | 固定 SDK、DSH、Node、插件及依赖，校验生效的插件列表。 | `src/dsh/profile.ts`、`docker/`、`package-lock.json` |
 
 DSH 运行模块统一处理 SDK 细节。Task 和 HTTP 调用者拿到的是运行结果和必要事件；现有 Python 版作为独立镜像保留，用于对照和回滚。等第二个真实内核需要接入时，再决定是否抽象出通用运行时接口。
 
@@ -92,25 +83,25 @@ sequenceDiagram
 
 ## 4. Chat 的两个设计决策
 
-### 图 3 · 建议的会话与事件流
+### 图 3 · 当前会话与事件流
 
 ```mermaid
 flowchart LR
     DB["DiOS DB · 展示用历史"] --> O["DiOS Chat"]
-    O -->|"session_id 与本轮输入"| API["DiAgent HTTP / SSE"]
-    API -->|"按 Agent、模型配置和会话定位"| R["DSH 运行模块"]
-    R -->|"新建或恢复"| S["DSH Session · 模型上下文"]
+    O -->|"完整 messages 与本轮授权"| API["DiAgent HTTP / SSE"]
+    API -->|"解析历史、模型和工具"| R["DSH 运行模块"]
+    R -->|"本轮启动并注入历史"| S["DSH Session"]
     S -->|"会话事件"| MAP["事件映射"]
     MAP -->|"文本、工具事件、终态"| API
     API -->|"SSE 或普通 JSON"| O
     O -->|"保存最终文本"| DB
 ```
 
-**历史。** 当前 DiOS Chat 从数据库重建整段 `messages`，内部转发没有 `session_id`。候选 DSH SDK 的 `session/prompt` 只提交本轮用户内容，公开接口未提供导入整段 OpenAI 角色消息的能力。建议服务阶段做一处 DiOS 兼容扩展：继续发送原有消息结构，同时透传稳定的 `session_id`。新 DiAgent 按 Agent 和会话定位持久 DSH Session，每轮只提交新增用户输入。DiOS DB 继续用于展示和审计。历史会话先保留旧路径，迁移前验证用上下文引入历史、或从新会话开始的产品语义。直接调用 DiAgent 且只发完整历史的旧调用者，也需要单独的兼容测试。 [DiOS 历史与请求](https://github.com/HQIT/DiOS/blob/f2433d950925b773ae33e7c50cb0579dea1d4115/backend/app/api/apps/chat.py#L89) · [SDK 协议字段](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.1/packages/sdk/protocol/src/types.ts)
+**历史。** DiOS 从数据库重建 `messages`。DiAgent 在每轮的 DSH 会话中注入这段历史。本机已验证旧 DiOS 会话续聊，外部调用者是否仍使用旧的独立会话接口需要在目标环境核对。 [Chat 历史插件](../src/dsh/plugins/chat-history.ts)
 
-**SSE。** 用实测确认 SDK 能提供的文本事件粒度。DiOS 目前收集 `choices[0].delta.content`，并从自定义 `tool_call` 的结束事件提取人工审批提示。第一轮测试要检查纯文本、工具调用、错误、中断和 `[DONE]`。若现有 SDK 通知只能满足已提交消息级的输出，而现有使用方要求实时文本增量，再验证 DSH 插件监听运行内事件并桥接到 DiAgent 的方案。该插件是否有稳定的事件来源，当前仍是 PoC 问题。 [DiOS SSE 消费](https://github.com/HQIT/DiOS/blob/f2433d950925b773ae33e7c50cb0579dea1d4115/backend/app/api/apps/chat.py#L158) · [SDK 通知接口](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.1/packages/sdk/protocol/README.md#the-sdk-methods)
+**SSE。** 纯文本请求通过 DSH 插件桥接增量。带工具的请求映射工具开始、结束、失败及事件审批，并在模型步骤结束时发送该步文本。 [常驻服务接口](../README.md#typescript--dsh-常驻服务试点)
 
-**进程粒度。** 首版 task 每容器一个 DSH 子进程。service PoC 可先每会话独立子进程，串行处理同一会话的 turn，并测启动延迟、空闲回收和会话恢复。候选 SDK 在进程初始化时绑定模型路由，且无单会话取消 RPC。共享进程应以相同配置和取消行为通过测试为前提。 [SDK 初始化与关闭](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.1/packages/sdk/client/README.md)
+**进程粒度。** Task 每次运行启动一个 DSH 子进程。Service 可以复用 HTTP 容器，每次调用启动和回收本次的 DSH 子进程。 [共享执行入口](../src/dsh/task-runtime.ts)
 
 ## 5. 参考 EduWork 的装配方式
 
@@ -143,4 +134,4 @@ flowchart LR
 
 实施顺序是 **镜像与 profile 冒烟 → 一次性任务验收 → 在线服务与存量调用兼容验收 → 按部署切换**。DiOS 沿用现有的 task 和 service 镜像配置。两类入口通过验收后均使用 TypeScript + DSH，旧 DeepAgents 镜像用于回滚。部署验收优先验证保持镜像标签时，DiOS 持续运行，新任务使用更新后的镜像。修改 Compose 中的镜像选择环境变量时，用原数据库和工作区重新创建 DiOS backend 容器。 [DiOS 镜像配置](https://github.com/HQIT/DiOS/blob/f2433d950925b773ae33e7c50cb0579dea1d4115/backend/app/config.py#L13)
 
-本设计基于本地源码和上游公开接口，未在目标 Linux 镜像中运行 DSH。图中的会话 ID 透传、插件权限和运行事件映射均为拟议设计。当前交付为架构文档，未修改产品代码。
+现有 task、Chat 和 A2A 已有本地容器验收记录。共享 profile 装配与两套默认配置是下一项实现内容。目标环境切换按 [验收指南](2026-11-reviewer-cutover.md) 执行。

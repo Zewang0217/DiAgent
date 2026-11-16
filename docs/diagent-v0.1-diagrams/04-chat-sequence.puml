@@ -32,18 +32,18 @@ participant "工具 / DiOS CLI" as Tool
 
 User -> OS : 发送消息
 OS -> DB : 读取展示历史，保存用户消息
-OS -> Http : POST /v1/chat/completions\n现有 messages + 拟透传的 session_id
-Http -> Run : 解析角色、工具选择与会话
-Run -> DSH : 新建 / 恢复 Session，提交本轮输入
+OS -> Http : POST /v1/chat/completions\n完整 messages 与本轮授权
+Http -> Run : 解析历史、模型与工具选择
+Run -> DSH : 启动本轮 Session，装配历史，提交输入
 loop 会话执行期间
     opt 有获准工具
         DSH -> Tool : 执行 Shell / MCP / HQIT 工具
-        Tool --> DSH : 结果可包含 pending_hil
+        Tool --> DSH : 工具结果或审批状态
     end
     DSH -->> Run : 文本或工具事件
     opt 请求 SSE
         Run -->> Http : 映射本轮事件
-        Http -->> OS : 文本增量或 tool_call
+        Http -->> OS : 文本、tool_call 或 event_approval
         opt DiOS CLI 返回待审批
             OS -> OS : pending_hil 映射为 hil
         end
@@ -60,8 +60,7 @@ else SSE
     OS --> User : 流结束
 end
 OS -> DB : 保存展示用回答
-note over Run, DSH
-  拟由 DSH 保存模型上下文
-  文本增量粒度和旧历史接续待 PoC
+note over OS, DB
+  DiOS 维护对话历史，常驻容器可复用
 end note
 @enduml

@@ -2,6 +2,8 @@
 
 DiAgent 在 Docker 容器中运行智能体任务。本分支使用 TypeScript 和 DSH 实现一次性任务与常驻服务，迁移进度见 [v0.1 待办](docs/TODO.md)。
 
+下一阶段的共享执行、插件清单和两套默认配置见 [架构设计](docs/2026-11-diagent-dsh-architecture.md#基础与两种默认配置)。
+
 两张 DSH 镜像的版本发布、部署选择和回滚见 [镜像发布与 Reviewer 验收](docs/2026-11-reviewer-cutover.md)。
 
 ## TypeScript / DSH 常驻服务试点

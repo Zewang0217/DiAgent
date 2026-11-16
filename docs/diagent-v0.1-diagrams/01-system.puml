@@ -1,4 +1,5 @@
 @startuml
+!pragma layout smetana
 title 01  系统黑盒 · DiOS 与 DiAgent
 skinparam backgroundColor #F9FBFE
 skinparam defaultFontName Microsoft YaHei
@@ -14,6 +15,7 @@ skinparam databaseBorderColor #7896B2
 skinparam artifactBorderColor #7896B2
 left to right direction
 actor "使用者 / 外部事件源" as Caller
+actor "外部调度器" as ExternalScheduler
 node "部署环境" as Host #F0F4F9 {
   component "DiOS" as OS #E0EDFF
   note bottom of OS
@@ -21,18 +23,21 @@ node "部署环境" as Host #F0F4F9 {
     事件路由、调度与授权
     保存 Chat 历史、运行状态及产物索引
   end note
+  component "独立任务 API" as HostAPI #E0EDFF
   node "Docker Engine" as Docker #F2F4F8 {
-    node "DiAgent\n运行中的容器" as Agent #E7F5EF
+    node "DiAgent 容器\n使用相同的执行逻辑" as Agent #E7F5EF
   }
-  artifact "DiAgent 镜像\ntask / service 入口" as Image #F4F7FD
+  artifact "固定版本运行层\nTask / HTTP 启动入口" as Image #F4F7FD
   database "Agent 工作区" as Work #FFFFFF
 }
 cloud "模型端点 / MCP 工具" as External #FFFFFF
 
 Caller --> OS : Chat / Webhook / A2A
+ExternalScheduler --> HostAPI : 提交任务、状态、产物
+HostAPI --> Docker : 启动一次性容器
 OS --> Docker : 启动与检查容器\n读取退出状态与日志
 Image ..> Agent : «instantiate»
-OS --> Agent : service · HTTP / SSE
+OS --> Agent : HTTP / SSE\n本次授权的能力
 OS --> Work : task · 写任务 JSON\n读取结果及登记产物
 Agent --> Work : 读取配置、访问文件\n写 task_result.md / task.log
 Agent --> External : 模型与获准工具调用

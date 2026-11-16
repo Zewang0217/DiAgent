@@ -35,15 +35,12 @@ Caller -> OS : 触发一次任务
 OS -> WS : 写任务 JSON 与必要的 MCP 配置
 OS -> Docker : 选 task 镜像，挂载工作区，启动
 Docker -> Task : 传入 TASK_CONFIG
-Task -> Run : 解析模型、角色、Skill、工具和子 Agent 配置
+Task -> Run : 解析模型、角色、Skills 与工具配置
 Run -> DSH : SDK 启动并初始化，再提交任务
 loop 模型决策与获准工具调用
     DSH -> External : 模型请求 / MCP 工具调用
     External --> DSH : 模型或工具结果
     DSH -> WS : Skill / 文件 / Shell 共用工作区
-    opt 配置了具名子 Agent
-        DSH -> DSH : 委托子 Agent，汇集结果与产物
-    end
     DSH --> Run : 会话事件与工具结果
 end
 alt 任务完成
