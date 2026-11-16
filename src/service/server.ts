@@ -1,10 +1,26 @@
 /** 常驻 DiAgent 的 HTTP 入口，保留 DiOS 的健康检查契约。 */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { ChatRequestError, completeChat } from './chat.js';
+import { once } from 'node:events';
+import { ChatRequestError, completeChat, type ChatCompletionIdentity } from './chat.js';
 
 function sendJson(response: ServerResponse, status: number, value: object): void {
   response.writeHead(status, { 'Content-Type': 'application/json' });
   response.end(JSON.stringify(value));
+}
+
+function startChatStream(response: ServerResponse): void {
+  response.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache',
+    'X-Accel-Buffering': 'no',
+  });
+}
+
+function chatChunk(identity: ChatCompletionIdentity, delta: object, finishReason: 'stop' | null): string {
+  const { id, created, model } = identity;
+  return 'data: ' + JSON.stringify({ id, created, model, object: 'chat.completion.chunk',
+    choices: [{ index: 0, delta, finish_reason: finishReason }],
+  }) + '\n\n';
 }
 
 /** 读入有大小限制的 JSON。执行期间断开连接或超时会取消 DSH。 */
@@ -33,12 +49,39 @@ async function handleChat(request: IncomingMessage, response: ServerResponse, en
       return;
     }
     signal = AbortSignal.any([disconnected.signal, AbortSignal.timeout(290_000)]);
-    const result = await completeChat(input, env, signal);
-    if (!response.destroyed) sendJson(response, 200, result);
+    const isStreaming = typeof input === 'object' && input !== null && 'stream' in input && input.stream === true;
+    const grant = request.headers['x-diagent-model-grant'];
+    const contextLength = request.headers['x-diagent-model-context-length'];
+    const modelGrant = { token: typeof grant === 'string' ? grant : undefined,
+      contextLength: typeof contextLength === 'string' ? contextLength : undefined };
+    let sentRole = false;
+    const result = await completeChat(input, env, signal, modelGrant, isStreaming ? async (identity, output) => {
+      signal.throwIfAborted();
+      if (!response.headersSent) startChatStream(response);
+      let frame;
+      if ('event' in output) {
+        frame = 'event: ' + output.type + '\ndata: ' + JSON.stringify(output.event) + '\n\n';
+      } else {
+        const delta = output.type === 'reasoning' ? { reasoning_content: output.text } : { content: output.text };
+        frame = chatChunk(identity, sentRole ? delta : { role: 'assistant', ...delta }, null);
+        sentRole = true;
+      }
+      if (!response.write(frame)) await once(response, 'drain', { signal });
+    } : undefined);
+    if (response.destroyed) return;
+    if (isStreaming) {
+      if (!response.headersSent) startChatStream(response);
+      response.end(chatChunk(result, {}, 'stop') + 'data: [DONE]\n\n');
+    } else {
+      sendJson(response, 200, result);
+    }
   } catch (error) {
     if (response.destroyed) return;
-    if (error instanceof ChatRequestError) {
-      sendJson(response, 400, { detail: error.message });
+    if (response.headersSent) {
+      const detail = signal.aborted ? 'Chat execution timed out' : 'DSH chat execution failed';
+      response.end('data: ' + JSON.stringify({ error: detail }) + '\n\n');
+    } else if (error instanceof ChatRequestError) {
+      sendJson(response, error.status, { detail: error.message });
     } else if (signal.aborted) {
       sendJson(response, 504, { detail: 'Chat execution timed out' });
     } else {

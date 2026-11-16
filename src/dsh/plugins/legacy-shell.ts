@@ -48,8 +48,11 @@ function legacyResult(result: ToolExecutionResult): string {
 }
 
 /** 通过 DSH 工具管道委派 Bash，沿用工作区策略、取消和当前工具轮次。 */
-export function apply(ctx: Context): void {
-  const pipeline = new ToolExecutionPipeline(ctx);
+export function apply(ctx: Context, config?: { bashDelegationOnly?: boolean }): void {
+  // Chat 只向模型开放 shell，内部 Bash 仍经过同一个执行管道和 Agent 权限策略。
+  const pipeline = new ToolExecutionPipeline(ctx, config?.bashDelegationOnly ? {
+    get: name => name === 'bash' ? ctx.tools.executable(name) : undefined,
+  } : undefined);
   const gitToken = process.env.GIT_PLATFORM_TOKEN;
   const legacyCalls = new Set<ToolExecutionToken>();
   if (gitToken) {

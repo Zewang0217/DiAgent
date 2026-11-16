@@ -21,13 +21,13 @@ export function modelProfileRow(model: TaskConfig['model']): object {
   } } } };
 }
 
-async function skillRoots(config: TaskConfig, home: string): Promise<string[]> {
-  if (config.skillNames.length === 0) return [config.skillsDir];
-
+/** 建立本轮私有的 Skill 视图，DSH 只发现显式指定的目录。 */
+export async function selectedSkillRoots(skillsDir: string, skillNames: string[], home: string): Promise<string[]> {
+  if (skillNames.length === 0) return [];
   const selectedRoot = join(home, 'selected-skills');
   await mkdir(selectedRoot);
-  for (const name of config.skillNames) {
-    const directory = join(config.skillsDir, name);
+  for (const name of skillNames) {
+    const directory = join(skillsDir, name);
     try {
       if (!(await stat(join(directory, 'SKILL.md'))).isFile()) throw new Error('Not a file');
     } catch {
@@ -46,6 +46,11 @@ async function mcpRows(path: string | undefined) {
   } catch {
     throw new TaskConfigError('Cannot read or parse MCP config: ' + path);
   }
+  return mcpProfileRows(servers);
+}
+
+/** 将已授权的 Streamable HTTP 连接转换成 DSH 插件配置。 */
+export function mcpProfileRows(servers: unknown) {
   if (!servers || typeof servers !== 'object' || Array.isArray(servers)) {
     throw new TaskConfigError('MCP config must be a server map');
   }
@@ -81,7 +86,8 @@ async function mcpRows(path: string | undefined) {
  * @throws TaskConfigError 指定的 Skill 不可用，或 MCP 配置无效。
  */
 export async function writeTaskProfile(config: TaskConfig, home: string, runDirectory: string): Promise<string> {
-  const skills = await skillRoots(config, home);
+  const skills = config.skillNames.length === 0 ? [config.skillsDir]
+    : await selectedSkillRoots(config.skillsDir, config.skillNames, home);
   const mcpPlugins = await mcpRows(config.mcpConfigPath);
   const plugins: object[] = [...mcpPlugins];
   // DSH 在原生 Windows 上提供 PowerShell，Linux 镜像才是本工具的交付环境。

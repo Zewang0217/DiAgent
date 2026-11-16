@@ -1,11 +1,13 @@
 /** 封装一次性任务的 DSH 会话和子进程生命周期，将运行终态交回任务入口。 */
 import { DeepSeekHarness, validatedSessionEvent } from '@deepseek-ai/dsh-sdk-client';
+import { pluginRecordOf, type SessionEvent } from '@deepseek-ai/dsh-session';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { TaskConfig } from '../task/config.js';
 import { writeTaskProfile } from './profile.js';
+import { textDeltaRecord } from './plugins/chat-stream.js';
 
 /**
  * 在配置的工作区启动独立 DSH 子进程，完成或取消后清理临时配置。
@@ -20,9 +22,12 @@ export async function runDshTask(
   log: (message: string) => void,
 ): Promise<string> {
   return runDshTurn(config, home => writeTaskProfile(config, home, runDirectory), signal, log, {
-    DIOS_API: process.env.DIOS_API || 'http://backend:8000',
-    DIAGENT_EVENT_ACCESS_TOKEN: process.env.DIAGENT_EVENT_ACCESS_TOKEN ?? '',
-    GIT_PLATFORM_TOKEN: process.env.GIT_PLATFORM_TOKEN ?? '',
+    toolEnv: {
+      DIOS_API: process.env.DIOS_API || 'http://backend:8000',
+      DIAGENT_EVENT_ACCESS_TOKEN: process.env.DIAGENT_EVENT_ACCESS_TOKEN ?? '',
+      GIT_PLATFORM_TOKEN: process.env.GIT_PLATFORM_TOKEN ?? '',
+    },
+    permissionMode: 'workspace-write',
   });
 }
 
@@ -32,7 +37,12 @@ export async function runDshTurn(
   writeProfile: (home: string) => Promise<string>,
   signal: AbortSignal,
   log: (message: string) => void,
-  taskEnv?: Pick<NodeJS.ProcessEnv, 'DIOS_API' | 'DIAGENT_EVENT_ACCESS_TOKEN' | 'GIT_PLATFORM_TOKEN'>,
+  { toolEnv, permissionMode = 'read-only', onTextDelta, onToolStreamEvent }: {
+    toolEnv?: Pick<NodeJS.ProcessEnv, 'DIOS_API' | 'DIAGENT_EVENT_ACCESS_TOKEN' | 'GIT_PLATFORM_TOKEN'>;
+    permissionMode?: 'workspace-write' | 'read-only';
+    onTextDelta?: (text: string) => Promise<void>;
+    onToolStreamEvent?: (event: SessionEvent<'assistant/message' | 'tool/call' | 'tool/result'>) => Promise<void>;
+  } = {},
 ): Promise<string> {
   const home = await mkdtemp(join(tmpdir(), 'diagent-dsh-'));
   try {
@@ -48,12 +58,12 @@ export async function runDshTurn(
       processCwd: config.workspace,
       env: {
         ...process.env,
-        // 空值也显式传递，阻止无工具 Chat 和工作区 .env 注入这些任务凭据。
-        DIOS_API: taskEnv?.DIOS_API ?? '',
-        DIAGENT_EVENT_ACCESS_TOKEN: taskEnv?.DIAGENT_EVENT_ACCESS_TOKEN ?? '',
+        // 空值也显式传递，阻止工作区 .env 注入未授予本轮工具的凭据。
+        DIOS_API: toolEnv?.DIOS_API ?? '',
+        DIAGENT_EVENT_ACCESS_TOKEN: toolEnv?.DIAGENT_EVENT_ACCESS_TOKEN ?? '',
         DIAGENT_MODEL_API_KEY: config.model.apiKey,
-        GIT_PLATFORM_TOKEN: taskEnv?.GIT_PLATFORM_TOKEN ?? '',
-        DSH_PERMISSION_MODE: taskEnv ? 'workspace-write' : 'read-only',
+        GIT_PLATFORM_TOKEN: toolEnv?.GIT_PLATFORM_TOKEN ?? '',
+        DSH_PERMISSION_MODE: permissionMode,
         DSH_TELEMETRY_MODE: 'DISABLED',
         DSH_MAX_TOKENS_AS_SUCCESS: 'false',
       },
@@ -72,6 +82,7 @@ export async function runDshTurn(
         await harness.client.prompt(sessionId, [{ type: 'text', text: config.prompt }]);
         const finished = harness.client.request('session/wait', { sessionId }).then(() => null);
         let steps = 0;
+        let startedRootStep = false;
         let reply = '';
         let reason: string | undefined;
         let errorCode: string | undefined;
@@ -87,8 +98,18 @@ export async function runDshTurn(
           }
           log('[dsh] ' + event.type);
           if (notification.params.sessionId !== sessionId) continue;
-          if (event.type === 'assistant/message') {
-            reply = event.data.message.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('');
+          if (event.type === 'step/start') startedRootStep = true;
+          if (startedRootStep && onToolStreamEvent && (event.type === 'assistant/message'
+            || event.type === 'tool/call' || event.type === 'tool/result')) {
+            await onToolStreamEvent(event);
+          }
+          const streamed = onTextDelta && pluginRecordOf(event);
+          if (streamed && streamed.type === textDeltaRecord) {
+            if (typeof streamed.data !== 'string') throw new Error('Invalid DSH chat text delta');
+            await onTextDelta(streamed.data);
+          } else if (event.type === 'assistant/message' && startedRootStep) {
+            const text = event.data.message.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('');
+            reply = onTextDelta ? reply + text : text;
           } else if (event.type === 'turn/end') {
             reason = event.data.reason.kind;
             if (event.data.reason.kind === 'error') errorCode = event.data.reason.error.code;
