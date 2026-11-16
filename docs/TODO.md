@@ -4,12 +4,25 @@
 
 v0.1 的交付目标是用 TypeScript + DSH 完整替代现有 DiAgent。一次性任务和在线服务统一使用 DSH，旧镜像仅用于切换验证与回滚。
 
+## 镜像交付
+
+- [x] 从 `d9984e4` 生成同版本 Linux amd64 task、service 参考镜像。task 回归 11 项通过。`dios-diagent-service:dsh-d9984e4` 镜像 ID 为 `sha256:1791677fceef96ac1b3deabd88e7db02da0ea5ee0360b75b7eaf6f2427186a20`，服务回归 3 项通过。
+- [x] 确定发布候选的锁定依赖。DSH 统一升级至 `0.2.2-rc.3`，YAML 升级至 `2.9.1`。DSH 仍固定旧的 `undici`、`fflate` 和 MCP client，临时覆写到 `8.12.2`、`0.8.3` 和 `2.3.0`。npm 生产依赖审计由 211 项降到 0 项，Linux task 11 项和 service 3 项回归通过。后续 DSH 若采用已修复版本，移除对应覆写并复验。
+- [x] 新增 DSH 双镜像发布工作流。同一源码修订构建并测试两张镜像，手动发布使用完整提交 SHA，双镜像推送成功后记录两个仓库 digest。DiOS 三种部署 Compose 均验证了独立 digest 覆写及旧默认值。
+- [x] 最终候选两张镜像在隔离 DiOS 联调通过。Reviewer 同标签切换与回滚的三次任务为 `25656792552a`、`7c87a9eaf282`、`29225b0083a6`。常驻服务复用同一容器完成两次单轮请求，并将模拟模型错误登记为 `failed`。工作流已离线验证两次推送成功和第二次推送失败的摘要行为。
+- [ ] 在 GitHub Actions 运行发布工作流并登记两个仓库 digest。工作流需由仓库操作者执行。
+- [ ] 让目标环境分别按 digest 选择 task 和 service，走现有 [Reviewer 切换与回滚验收](2026-11-reviewer-cutover.md)，并验证常驻容器实际使用的镜像和回滚。两类镜像可独立切换，常驻服务切换还需满足下方兼容项。
+
 ## 当前 ticket
 
+- [x] DiAgent 本地 Compose 和 DiOS 开发配置统一使用 DSH 的 `task`、`service` 构建目标。两个入口均成功构建镜像，DiOS 的镜像标签和容器网络与 Compose 展开结果一致。两路评审后修复了默认任务样例和网络配置。默认样例在容器内通过解析，Linux 镜像中任务 11 项、服务 3 项测试通过。Windows 原生单轮服务测试返回 502，待单独定位。目标环境切换继续按下方验收项执行。
 - [x] 支持 DiOS 下发的 `max_tool_rounds`。Windows 与 Linux 集成测试各 11 项通过，真实 DSH 对同一步的两次 MCP 调用只扣一个轮次，下一步超额调用未到达模拟工具。双评审通过。使用 AI4R Reviewer 配置脚本中的 `recursion_limit=120`、`max_tool_rounds=20`，本机 DiOS 调度 Linux 镜像成功回收模拟任务 `acc24a8df62d` 的产物。
 - [x] 完成本地 AI4R Reviewer `once` 新旧镜像对照。用同一份合成草稿、仓库 Reviewer 提示词和 `ecnu-max` 顺序运行两次。旧 Python 和新 DSH 均退出 0、写出 `review.md` 和 `task_result.md`，并各在隔离 DiOS 登记一条 `ai4r.review.completed`。两份报告均指出缺少样本量、基线定义不清，最终答复均为 `changes_requested`。另用模拟模型完成五项对照，模型返回 HTTP 400 时两版均退出 1 且无新事件，重新选用旧镜像后成功。
 - [x] 在本机 DiOS 用同一条 Reviewer 订阅演练一次性任务镜像切换。三轮依次为 Python `cd9c1fc296d3`、DSH `3614ed9c68b5`、回滚 Python `c7846ca71f1f`。每轮通过事件 API 提交 `ai4r.draft.submitted`，核对实际容器镜像、A2A 终态、`review.md`、DiOS 登记的 `task_result.md` 和一条 `ai4r.review.completed`。等任务完成后才重新创建 DiOS `backend` 容器，复用同一 SQLite 和工作区，Agent、订阅和已完成任务跨重启保留。演练使用模拟模型和源码重建的旧镜像。
-- [ ] 在目标环境复验切换与回滚。核对旧镜像 ID 或 digest、DSH 候选镜像、有效 Compose 配置与事件发布鉴权。优先用同一个部署镜像标签验证新任务使用更新后的镜像、在途任务继续完成。若需要改 `DIOS_DIAGENT_IMAGE` 的值，复用原数据库和工作区重新创建 DiOS `backend` 容器。目标部署若尚未包含 [DiOS 启动恢复修复](https://github.com/HQIT/DiOS/pull/61)，重启前等在途任务收尾。切换和回滚后各投一条独立草稿事件，核对任务终态、产物和完成事件。
+- [ ] 在目标环境复验切换与回滚。按 [Reviewer 切换与回滚验收](2026-11-reviewer-cutover.md) 核对镜像、现有订阅和发布鉴权，分别记录旧镜像、DSH 和回滚三阶段的结果。操作步骤已整理，目标环境执行待完成。
+- [x] 2026-11-16 从 Git 提交 `d9984e4` 无缓存重建 Linux amd64 验收镜像。旧本地镜像在 Docker 恢复后仍缺少文件层。重建镜像通过回归后更新 `dios-diagent-task:dsh-d9984e4`，镜像 ID 为 `sha256:ae6ee68ba74a7c30d605898d7d69d205b0e72111674e936afd315403afeee8be`。
+- [x] 固定版本镜像的 Linux 一次性任务回归 11 项通过，覆盖任务输入、MCP、产物、事件发布和鉴权。诊断复现确认，测试目录若挂载为 `noexec` 并用作 `TMPDIR`，DSH 的原生绑定无法加载。去掉额外测试挂载后复验通过。
+- [x] 2026-11-16 在本机隔离 DiOS 用模拟模型演练同标签切换。保持同一个 backend、数据库和 Reviewer 订阅，旧 Python 任务 `9c0c014c2e2b` 运行期间把标签指向 DSH `dsh-d9984e4`。旧容器保留原镜像并完成，新任务 `91266cc33609` 使用 DSH，恢复标签后 `75a39a889917` 使用旧镜像。按容器的实际镜像 ID 核对三轮，均完成并产生 `review.md`、`task_result.md` 和一条评审完成事件。
 - [x] `publish_event` 通过本地 Linux 容器联调。DiAgent `4ec0ca3`、DiOS `f2433d9`、模拟模型、空 SQLite，无全局访问令牌。手动启动任务容器，合法事件返回 `dispatched`，非法来源被拒绝，需审批的事件返回 `approval_required`。三次运行共落库两条事件，均为合法来源，任务产物写入宿主机挂载的工作区。验收时为构建下载临时启用代理和重试，并给本地 DiOS 验收镜像补装 `sqlalchemy[asyncio]`，以满足其当前解析到的 SQLAlchemy 版本。
 - [x] DiOS A2A 调度器启动 Linux 试点镜像。使用相同镜像、临时数据库及模拟模型与直连 MCP，通过 `message/send` 提交、`tasks/get` 查终态。成功用例 `f94a7feb52ea` 验证了 DiOS 生成配置、挂载共享 Skill、实际调用 Skill 和 MCP、落盘日志及登记 `task_result.md`。失败用例 `d1d5e35e5297` 模拟模型返回 HTTP 400，DiOS 登记退出码 1 和 `failed`。宿主机的 Docker Desktop 路径通过 `DIOS_HOST_WORKSPACE_ROOT` 显式映射。
 - [x] 首轮直连 MCP 工具可见性已复验。早期模拟服务在处理缺少 `params` 的请求时抛错。修正响应后，延迟 `tools/list` 1.5 秒的回归在 Windows 和 Linux 均验证首个模型请求包含工具。DiOS 调度用例 `6b3fe7ab3f67` 将延迟拉到 3 秒，同样通过。双评审确认由现有 DSH 启动流程负责等待初始工具发现。
@@ -28,7 +41,6 @@ v0.1 的交付目标是用 TypeScript + DSH 完整替代现有 DiAgent。一次�
 - [x] 常驻入口接通非流式、无工具单轮 Chat。用 DiOS A2A 请求形状通过实际 HTTP 和 DSH 验证角色、模型、无工具列表及 `choices[0].message.content`。
 - [x] 新增 DSH 常驻服务镜像构建目标，默认构建仍为一次性任务镜像。隔离的本机 DiOS 启动并探测常驻容器，同一容器完成两次无工具 A2A 请求并登记 `reply`，模拟模型错误时登记 `failed`。代码与设计评审通过。
 - [ ] 验证模型省略场景。DiOS 的 A2A service 当前只按模型显示名查找，模型 ID 或实际模型名可能导致请求省略 `model`。多模型配置需要明确默认模型或修正 DiOS 查找。
-- [ ] 上线前核对锁定依赖的 npm 审计报告。常驻镜像构建报告 211 项（202 项高危、9 项中危），受影响的运行路径及处置方式待确认。
 - [ ] 提供独立任务提交入口。外部调度器可提交任务、读取运行状态与结果。验收一个未部署 DiOS 的调用方使用自己的模型、MCP 和工作区完成任务。接口字段待定。
 - [ ] 接通多轮会话、SSE、工具事件和人工审批提示，验证中断、会话隔离和旧历史迁移。
 - [ ] 核实仍在使用的独立入口和配置。完成兼容验收后，将目标环境的 task 和 service 切换到 DSH，并演练按部署恢复旧镜像。

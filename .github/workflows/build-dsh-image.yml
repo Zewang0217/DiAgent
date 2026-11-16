@@ -1,0 +1,77 @@
+name: Build DSH images
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/build-dsh-image.yml'
+      - 'docker/agent-task-dsh/**'
+      - 'package*.json'
+      - 'tsconfig.json'
+      - 'src/**'
+      - 'tests/**'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the tested images with a commit-specific DSH tag
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build task and service images
+        run: |
+          for target in task service; do
+            docker build --platform linux/amd64 \
+              --target "$target" \
+              --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+              -f docker/agent-task-dsh/Dockerfile \
+              -t "diagent-$target:ci" .
+          done
+
+      - name: Test task image
+        run: |
+          docker run --rm --pull never \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/tests,target=/app/tests,readonly" \
+            --entrypoint node diagent-task:ci \
+            --test --test-concurrency=1 tests/dsh-task.test.mjs tests/publish-event.test.mjs
+
+      - name: Test service image
+        run: |
+          docker run --rm --pull never \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/tests,target=/app/tests,readonly" \
+            --entrypoint node diagent-service:ci --test tests/dsh-service.test.mjs
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish the tested images
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        shell: bash
+        run: |
+          published=()
+          for target in task service; do
+            repository="ghcr.io/${GITHUB_REPOSITORY,,}/agent-$target"
+            image="$repository:dsh-$GITHUB_SHA"
+            docker tag "diagent-$target:ci" "$image"
+            push_output=$(docker push "$image")
+            printf '%s\n' "$push_output"
+            digest=$(printf '%s\n' "$push_output" |
+              awk '/digest: sha256:/ { for (i=1; i<NF; i++) if ($i == "digest:") print $(i+1) }')
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            published+=("$repository@$digest")
+          done
+          printf '%s\n' "${published[@]}" >> "$GITHUB_STEP_SUMMARY"

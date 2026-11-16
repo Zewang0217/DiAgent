@@ -1,6 +1,8 @@
 # DiAgent
 
-基于 LangChain + LangGraph + DeepAgents 的智能体任务执行框架，通过 Docker 容器运行复杂的 AI 任务。
+DiAgent 在 Docker 容器中运行智能体任务。本分支使用 TypeScript 和 DSH 实现一次性任务与常驻服务，迁移进度见 [v0.1 待办](docs/TODO.md)。
+
+两张 DSH 镜像的版本发布、部署选择和回滚见 [镜像发布与 Reviewer 验收](docs/2026-11-reviewer-cutover.md)。
 
 ## TypeScript / DSH 常驻服务试点
 
@@ -8,7 +10,9 @@
 
 `POST /v1/chat/completions` 支持非流式、无工具的单轮文本问答，返回 `choices[0].message.content`。模型从 `LLM_MODELS_CONFIG_PATH` 指定的 YAML 加载，工作区由 `AGENT_WORKSPACE` 指定。请求可指定模型，也可使用部署配置的默认模型或唯一已配置模型。省略系统消息时使用 `AGENT_SYSTEM_PROMPT`。多轮历史、工具选择和 SSE 仍在迁移中。
 
-本机可用 `docker build --target service -f docker/agent-task-dsh/Dockerfile -t diagent-service:dsh-dev .` 构建常驻镜像。DiOS 通过 `DIOS_DIAGENT_SERVICE_IMAGE` 选择该镜像，并挂载工作区和模型配置。一次性任务仍使用同一 Dockerfile 的默认构建目标。
+本机可用 `docker compose build agent-service` 构建常驻镜像。DiOS 开发配置通过 `DIOS_DIAGENT_SERVICE_IMAGE` 选择 `dios-diagent-service:dsh-dev`，并挂载工作区和模型配置。
+
+独立启动常驻服务时，先在 `workspace/models.yaml` 配置模型目录。该 YAML 使用下方示例 `models` 对象的内容作为顶层结构，包含 `default_model` 和模型定义。凭据可通过本机环境变量 `LLM_OPENAI_API_KEY` 注入，然后执行 `docker compose up --build agent-service`。
 
 ## TypeScript / DSH 一次性任务试点
 
@@ -19,7 +23,7 @@ npm ci --ignore-scripts
 npm run test:task
 ```
 
-本地运行时，先执行 `npm run build`，设置 `TASK_CONFIG` 指向一次性任务的 JSON/YAML 文件，再执行 `npm run task:dsh`。试点 Dockerfile 位于 `docker/agent-task-dsh/Dockerfile`，可用 `docker build -f docker/agent-task-dsh/Dockerfile -t diagent-task:dsh-dev .` 单独构建。现有 Compose 仍使用 Python 镜像。
+本地运行时，先执行 `npm run build`，设置 `TASK_CONFIG` 指向一次性任务的 JSON/YAML 文件，再执行 `npm run task:dsh`。用 `docker compose build agent-task` 构建 `dios-diagent-task:dsh-dev`。两个 Compose 服务共用 `docker/agent-task-dsh/Dockerfile`，分别构建 `task` 和 `service` 目标。
 
 试点支持 OpenAI-compatible 模型、指定 Skills 与 Streamable HTTP MCP，保留配置的结果文件名和任务退出码。一次性任务的每轮模型请求使用 `task.temperature`，允许显式设置为 `0`，省略时沿用旧版默认值 `0.7`。具名子 Agent 的存量配置、独立触发器及 Chat/SSE 按兼容基线验收。 [v0.1 兼容基线](docs/2026-11-diagent-v0.1-compatibility-baseline.md)
 
@@ -35,7 +39,7 @@ Linux 一次性任务提供旧名 `shell(command, cwd?, timeout?)`。相对工�
 
 旧 Git 工作流可通过容器环境注入 `GIT_PLATFORM_TOKEN`。DiAgent 仅在兼容 `shell` 委派的 Bash 调用中显式注入该值。任务工作区的 `.env` 无法为它提供值。执行的脚本应避免把凭据写入输出或文件。
 
-## 特性
+## 旧版 Python 功能参考
 
 - **多模型支持**: 支持 Ollama、vLLM、OpenAI 及兼容 API 的 LLM 提供商
 - **MCP 集成**: 通过 langchain-mcp-adapters 连接外部工具服务器（支持 stdio、http 等协议）
@@ -49,7 +53,7 @@ Linux 一次性任务提供旧名 `shell(command, cwd?, timeout?)`。相对工�
 
 ### 1. 准备配置文件
 
-创建 `workspace/agent-task.json` 配置文件：
+使用 `workspace/agent-task.dsh.json` 的 ECNU 模型示例，并在本地环境配置 `LLM_OPENAI_API_KEY`。也可以修改该文件以使用自己的 OpenAI 兼容模型。
 
 ```json
 {
@@ -59,14 +63,14 @@ Linux 一次性任务提供旧名 `shell(command, cwd?, timeout?)`。相对工�
       "your-model": {
         "provider": "openai",
         "model": "gpt-4o",
-        "base_url": "https://api.openai.com/v1",
-        "api_key": "sk-xxx"
+        "base_url": "https://api.openai.com/v1"
       }
     }
   },
   "task": {
     "task": "你的任务描述",
-    "model": "your-model"
+    "model": "your-model",
+    "workspace": "/workspace"
   }
 }
 ```
@@ -74,7 +78,7 @@ Linux 一次性任务提供旧名 `shell(command, cwd?, timeout?)`。相对工�
 ### 2. 构建 Docker 镜像
 
 ```bash
-docker build -t agent-task:latest -f docker/agent-task/Dockerfile .
+docker compose build agent-task
 ```
 
 ### 3. 运行任务
@@ -82,14 +86,16 @@ docker build -t agent-task:latest -f docker/agent-task/Dockerfile .
 ```bash
 docker run --rm \
   -v $(pwd)/workspace:/workspace \
-  -e TASK_CONFIG=/workspace/agent-task.json \
-  agent-task:latest
+  -e TASK_CONFIG=/workspace/agent-task.dsh.json \
+  -e LLM_OPENAI_API_KEY \
+  -e OUTPUT_DIR=/workspace/output \
+  dios-diagent-task:dsh-dev
 ```
 
 或使用 docker-compose：
 
 ```bash
-docker-compose up
+docker compose up --build agent-task
 ```
 
 ## 配置文件详解
