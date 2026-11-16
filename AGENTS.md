@@ -6,3 +6,4 @@
 - 每项功能通过测试后，委派两个独立子 Agent。代码评审核对契约、异常和测试。高层设计（HLD）评审核对模块职责、可复用逻辑和设计模式的适用性，并指出具体调用者及引入成本。处理发现并复验后记录结论。
 - 本地任务构建与验证命令见 [README](README.md#typescript--dsh-一次性任务试点)。容器部署和 CI 由操作者执行。
 - 常驻服务启动与验证命令见 [README](README.md#typescript--dsh-常驻服务试点)。
+- 本地构建 DSH 镜像使用 `docker compose build agent-task agent-service`，DiOS 的开发配置使用同一对 `dsh-dev` 镜像。

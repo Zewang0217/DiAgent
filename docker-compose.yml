@@ -7,11 +7,13 @@ services:
   agent-task:
     build:
       context: .
-      dockerfile: docker/agent-task/Dockerfile
-    image: agent-task:v0.1.0
+      dockerfile: docker/agent-task-dsh/Dockerfile
+      target: task
+    image: dios-diagent-task:dsh-dev
     container_name: agent-task
     environment:
-      TASK_CONFIG: /workspace/agent-task.json
+      TASK_CONFIG: /workspace/agent-task.dsh.json
+      LLM_OPENAI_API_KEY: ${LLM_OPENAI_API_KEY:-}
       OUTPUT_DIR: /workspace/output
       TRIGGER_MODE: once
     volumes:
@@ -22,17 +24,17 @@ services:
   agent-service:
     build:
       context: .
-      dockerfile: docker/agent-service/Dockerfile
-    image: agent-service:v0.1.0
+      dockerfile: docker/agent-task-dsh/Dockerfile
+      target: service
+    image: dios-diagent-service:dsh-dev
     container_name: agent-service
     ports:
       - "8000:8000"
     environment:
       AGENT_WORKSPACE: /workspace
-      MCP_CONFIG_PATH: /workspace/mcp_servers.json
-      LLM_DEFAULT_MODEL: ${LLM_DEFAULT_MODEL:-qwen2.5-14b}
+      LLM_DEFAULT_MODEL: ${LLM_DEFAULT_MODEL:-}
       LLM_MODELS_CONFIG_PATH: /workspace/models.yaml
-      SKILLS_DIR: skills
+      LLM_OPENAI_API_KEY: ${LLM_OPENAI_API_KEY:-}
     volumes:
       - ./workspace:/workspace
     restart: unless-stopped

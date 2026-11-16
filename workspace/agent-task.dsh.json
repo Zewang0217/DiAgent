@@ -1,0 +1,20 @@
+{
+  "models": {
+    "default_model": "ecnu-max",
+    "models": {
+      "ecnu-max": {
+        "provider": "openai",
+        "model": "ecnu-max",
+        "base_url": "https://chat.ecnu.edu.cn/open/api/v1"
+      }
+    }
+  },
+  "task": {
+    "task": "用一句话确认当前的 DiAgent 任务已启动。",
+    "workspace": "/workspace",
+    "tools": [],
+    "output": {
+      "result_file": "task_result.md"
+    }
+  }
+}
