@@ -15,16 +15,21 @@
   },
   "dependencies": {
     "@deepseek-ai/cordis": "4.1.0",
-    "@deepseek-ai/dsh": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-agent": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-llm": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-sdk-client": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-shell-env": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
-    "yaml": "2.8.2"
+    "@deepseek-ai/dsh": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-agent": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-sdk-client": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-shell-env": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.3",
+    "yaml": "2.9.1"
   },
   "devDependencies": {
     "@types/node": "24.9.1",
     "typescript": "5.9.3"
+  },
+  "overrides": {
+    "undici": "8.12.2",
+    "fflate": "0.8.3",
+    "@modelcontextprotocol/client": "2.3.0"
   }
 }
