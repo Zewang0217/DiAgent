@@ -8,11 +8,21 @@ DiAgent 在 Docker 容器中运行智能体任务。本分支使用 TypeScript �
 
 使用 Node.js 24.9 或更高版本。执行 `npm run build` 后运行 `npm run service:dsh`，服务在端口 `8000` 提供 `GET /health`，响应为 `{"status":"healthy"}`。执行 `npm run test:service` 验证 HTTP 契约。
 
-`POST /v1/chat/completions` 支持非流式、无工具的单轮文本问答，返回 `choices[0].message.content`。模型从 `LLM_MODELS_CONFIG_PATH` 指定的 YAML 加载，工作区由 `AGENT_WORKSPACE` 指定。请求可指定模型，也可使用部署配置的默认模型或唯一已配置模型。省略系统消息时使用 `AGENT_SYSTEM_PROMPT`。多轮历史、工具选择和 SSE 仍在迁移中。
+`POST /v1/chat/completions` 默认返回 JSON，文本在 `choices[0].message.content` 中。设置 `stream: true` 后，通过 SSE 的 `choices[0].delta.content` 逐段返回文本，成功时发送 `finish_reason: "stop"` 和 `[DONE]`。首段发出后模型出错时，SSE 发送含 `error` 的数据帧并结束，DiOS 沿用其部分文本保存行为。
+
+多轮请求由调用方在 `messages` 中按顺序传入可选的开头系统消息、历史 `user` / `assistant` 文本和本轮 `user` 文本。DiOS 会从数据库组装历史。模型从 `LLM_MODELS_CONFIG_PATH` 指定的 YAML 加载，工作区由 `AGENT_WORKSPACE` 指定。请求可指定模型，也可使用部署配置的默认模型或唯一已配置模型。省略系统消息时使用 `AGENT_SYSTEM_PROMPT`。
+
+DiOS 启用受管模型时，容器配置改用 `DIAGENT_MODEL_PROXY_URL` 和 `DIAGENT_MODEL_PROXY_AGENT_ID`。调用方在每轮请求指定 `model`，通过 `X-DiAgent-Model-Grant` 传递短期凭据，可用 `X-DiAgent-Model-Context-Length` 传递模型上下文长度。DiAgent 先向代理的 `POST /grants/check` 核验模型和容器自身的 Agent ID，再调用 OpenAI 兼容的 `/chat/completions`。工作区无需模型目录，供应商密钥由调用方的调度服务保管。仍需从挂载中移除旧凭据文件。独立部署可继续使用本地模型目录。
+
+在线请求通过 `tool_selection.tool_ids` 选择 `shell`（Linux 镜像）、`publish_event` 和 `skill`。省略或传空列表时使用纯问答。`shell` 使用 DSH 的工作区写入策略。启用 `shell` 的请求在模型目录、工作区遗留的 `models.yaml`、`LLM_OPENAI_API_KEY` 或 `OPENAI_API_KEY` 内发现模型 API 凭据时会被拒绝。纯问答仍可使用这些部署凭据。`publish_event` 使用部署配置的 `DIOS_API` 和事件专用凭据，并遵循 `DIAGENT_ENABLE_DIOS_EVENTS`。启用 `skill` 时，DSH 从 `SKILLS_DIR` 发现 `DIAGENT_SKILL_NAMES` JSON 数组指定的 Skills。受管模式由 DiOS 注入这两项，并逐目录只读挂载。
+
+DiOS 在受管 Chat 和常驻 A2A 中按 Agent 分配将 `mcp` 放入 `tool_selection.tool_ids`。DiAgent 校验轮次授权后，通过 DiOS 网关装配获准的 Streamable HTTP MCP。网关筛选工具发现与调用，供应商凭据留在 DiOS。Tool selection 为空时保持纯问答。常驻网关按轮次绑定上游会话，到期或结束后撤销授权，并尝试关闭已绑定的上游会话。常驻网关不开放独立的 MCP GET SSE。
+
+带工具的 SSE 使用 `event: tool_call` 发送工具开始、结束或失败。如果 DiOS 把已发布事件置为待审批，发送 `event: event_approval` 及 `event_id`。启用工具时，模型每步结束后发送该步文本，附带工具调用的步将文本置于 `delta.reasoning_content`。纯问答仍逐段发送。独立服务端历史仍待确认调用方需求。
 
 本机可用 `docker compose build agent-service` 构建常驻镜像。DiOS 开发配置通过 `DIOS_DIAGENT_SERVICE_IMAGE` 选择 `dios-diagent-service:dsh-dev`，并挂载工作区和模型配置。
 
-独立启动常驻服务时，先在 `workspace/models.yaml` 配置模型目录。该 YAML 使用下方示例 `models` 对象的内容作为顶层结构，包含 `default_model` 和模型定义。凭据可通过本机环境变量 `LLM_OPENAI_API_KEY` 注入，然后执行 `docker compose up --build agent-service`。
+独立启动常驻服务时，先在 `workspace/models.yaml` 配置模型目录。该 YAML 使用下方示例 `models` 对象的内容作为顶层结构，包含 `default_model` 和模型定义。凭据通过本机环境变量 `LLM_OPENAI_API_KEY` 注入。`docker compose up --build agent-service` 在 `127.0.0.1:8000` 提供本地调试入口。
 
 ## TypeScript / DSH 一次性任务试点
 
@@ -26,6 +36,46 @@ npm run test:task
 本地运行时，先执行 `npm run build`，设置 `TASK_CONFIG` 指向一次性任务的 JSON/YAML 文件，再执行 `npm run task:dsh`。用 `docker compose build agent-task` 构建 `dios-diagent-task:dsh-dev`。两个 Compose 服务共用 `docker/agent-task-dsh/Dockerfile`，分别构建 `task` 和 `service` 目标。
 
 试点支持 OpenAI-compatible 模型、指定 Skills 与 Streamable HTTP MCP，保留配置的结果文件名和任务退出码。一次性任务的每轮模型请求使用 `task.temperature`，允许显式设置为 `0`，省略时沿用旧版默认值 `0.7`。具名子 Agent 的存量配置、独立触发器及 Chat/SSE 按兼容基线验收。 [v0.1 兼容基线](docs/2026-11-diagent-v0.1-compatibility-baseline.md)
+
+### 独立任务 HTTP 接口
+
+在有本机 Docker CLI 和 DSH 一次性镜像的宿主机运行 `npm run build` 和 `npm run task-api:dsh`。设置 `DIAGENT_TASK_IMAGE` 为本机已存在的 task 镜像标签或 digest，例如用 `docker compose build agent-task` 构建的 `dios-diagent-task:dsh-dev`。设置 `DIAGENT_TASK_API_TOKEN` 为调度器的访问令牌。服务默认监听 `127.0.0.1:8001`，可用 `DIAGENT_TASK_API_HOST` 和 `DIAGENT_TASK_API_PORT` 修改。容器连接部署方设置的 `DIAGENT_TASK_DOCKER_NETWORK`，省略时用 Docker 默认网络。跨主机调用应在受控网络或有 TLS 的代理后进行。
+
+`DIAGENT_TASK_PROFILES_DIR` 默认是 `diagent-task-profiles`。每个 profile 在该目录下放一个 `<profile>/agent-task.json`，使用下面的一次性任务配置格式。部署方在 `models` 声明模型别名与 OpenAI 兼容网关地址，用 `task.mcp_config_path` 和 `task.skills_dir` 指向 profile 内的文件和目录。模型和 MCP 上游密钥由各自网关保管。profile 随容器只读挂载，其中的全部文件都应允许任务读取。独立入口拒绝配置中的供应商 API key、MCP 请求头，以及模型和 MCP URL 中的凭据字段。
+
+例如，`diagent-task-profiles/reviewer/agent-task.json` 可以只配置模型网关和系统提示：
+
+```json
+{
+  "models": {
+    "default_model": "reviewer",
+    "models": {
+      "reviewer": {
+        "provider": "openai",
+        "model": "reviewer",
+        "base_url": "http://model-gateway:8080/v1"
+      }
+    }
+  },
+  "task": {
+    "system_prompt": "评阅提交的文稿并说明修改建议。"
+  }
+}
+```
+
+网关地址须能从任务容器访问。外部调度器只选 profile，调度请求与工作区文件无法覆盖模型和 MCP 配置。
+
+请求都携带 `Authorization: Bearer <token>`。调度器可调用以下三个入口：
+
+| 请求 | 行为 |
+| --- | --- |
+| `POST /v1/tasks` | 提交 `{"profile":"reviewer","prompt":"评阅 draft.md","files":{"draft.md":"正文"}}`。返回 `202`、任务 ID 和 `Location`。JSON 上限 1 MiB，`files` 可省略，文件以 UTF-8 写入专用工作区根目录。 |
+| `GET /v1/tasks/{id}` | 轮询 `starting`、`running`、`completed` 或 `failed`。有进程退出码时返回 `exit_code`。Docker 暂时无法查询时返回 `503`，调度器可以稍后再查。 |
+| `GET /v1/tasks/{id}/artifacts` | 任务结束后，返回产物的相对路径和字节数。拼接经 URL 编码的产物路径后可下载文件。 |
+
+`DIAGENT_TASK_API_ROOT` 默认是 `diagent-jobs`。该目录应由单个控制器进程使用，状态和工作区保存在宿主机，控制器重启后可用原 ID 查询。调度器应轮询至终态，控制器在确认退出后回收任务容器，产物按部署方的保留策略清理。每次提交会新建任务，收到响应后应保存 ID，后续重试状态查询。该入口服务于同一部署信任域内的调度器。
+
+测试命令为 `npm run test:task-api`。
 
 一次性任务的 `task.tools` 使用 MCP 服务公布的原始工具名。省略时使用所有已发现的 MCP 工具，空数组关闭 MCP，非空数组从任务启动时发现的工具中选取。文件等内置工具仍按任务配置提供。非空名单要求服务名和工具名能唯一转换成 DSH 工具名，存在歧义或需归一化的配置会报错。DiOS 网关仍负责上游工具授权。
 

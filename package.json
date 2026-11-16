@@ -10,6 +10,8 @@
     "build": "tsc -p tsconfig.json",
     "task:dsh": "node dist/task/main.js",
     "service:dsh": "node dist/service/server.js",
+    "task-api:dsh": "node dist/task-api/server.js",
+    "test:task-api": "npm run build && node --test tests/standalone-task-api.test.mjs",
     "test:service": "npm run build && node --test tests/dsh-service.test.mjs",
     "test:task": "npm run build && node --test --test-concurrency=1 tests/dsh-task.test.mjs tests/publish-event.test.mjs"
   },
