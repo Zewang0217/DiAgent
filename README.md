@@ -79,7 +79,28 @@ npm run test:task
 
 测试命令为 `npm run test:task-api`。
 
+启用 DiOS 的一次性任务受管推理后，DiOS 负责供应商鉴权，并在容器私有配置中提供 OpenAI 兼容代理地址和短期任务凭据。DiAgent 沿用现有 `models` 配置读取它。独立调度器可按上文为 profile 配置自己的模型网关。
+
 一次性任务的 `task.tools` 使用 MCP 服务公布的原始工具名。省略时使用所有已发现的 MCP 工具，空数组关闭 MCP，非空数组从任务启动时发现的工具中选取。文件等内置工具仍按任务配置提供。非空名单要求服务名和工具名能唯一转换成 DSH 工具名，存在歧义或需归一化的配置会报错。DiOS 网关仍负责上游工具授权。
+
+`task.tool_selection` 接受形如 `{"tool_ids":["skill","mcp"]}` 的对象，可选择 `skill`、`mcp` 和 `publish_event`。显式 `{"tool_ids":[]}` 关闭主 Agent 的常规工具，任务入口仍保存文本结果和日志。配置具名子 Agent 时，主 Agent 仍可委托给这些子 Agent。省略该字段沿用兼容默认值。选择 `skill` 时填写 `task.skill_names`。选择 `mcp` 时提供 MCP 配置，`task.tools` 若为非空名单会进一步过滤实际工具名。选择 `publish_event` 时需启用部署侧的事件开关。Task 镜像以 `org.hqit.diagent.task-tool-selection=1` 标明支持此契约。
+
+开启 DiOS 的任务模型代理和刷新后，可显式授予 `shell`、`read`、`write` 和 `edit`。原生文件工具检查任务工作区路径，写入及 Shell 由 DSH 使用工作区写入策略执行。Shell 可读取和修改沙箱允许的文件。刷新凭据由独立 UID 的本地进程读取，引导文件在 DSH 启动前销毁。此模式使用带 `org.hqit.diagent.task-model-refresh=1` 的 Linux 镜像和默认非特权 Docker 配置。
+
+`task.subagents` 可配置具名子 Agent。每项填写唯一的 `name`、供主 Agent 选择时参考的 `description`、子 Agent 的 `prompt` 和 `tool_selection.tool_ids`。空工具名单只启用子 Agent 的文本推理。选择 `read`、`write` 或 `edit` 时需开启任务模型代理和刷新。
+
+```json
+{
+  "name": "reviewer",
+  "description": "评审现有报告",
+  "prompt": "指出证据不足的结论",
+  "tool_selection": { "tool_ids": ["read"] }
+}
+```
+
+上述子 Agent 为主 Agent 提供 `delegate_reviewer`。reviewer 使用任务已选的模型，能读取工作区文件，评审回答回到主 Agent。DiOS 受管任务通过 `capabilities.subagents` 下发相同格式，需要带 `org.hqit.diagent.task-subagents=1` 的 Task 镜像。
+
+子 Agent 可以在 `tool_ids` 中选择 `skill` 并用 `skill_names` 指定名单。独立任务文件可用 `skills_dir` 指定目录，省略时从任务 Skill 目录解析名称。启用子 Agent 的 Skill 后，主 Agent 的 Skill 也按明确配置的 `skill_names` 发现。子 Agent 也可以选择 `mcp` 并指定自己的 Streamable HTTP `mcp_config_path`。此时主 Agent 需显式配置 `tool_selection`，且不能带有 Shell。独立 HTTP 入口从部署目录解析父子各自的 Skill 和 MCP 资产，并要求无凭据的网关配置。DiOS 负责为受管任务生成连接地址和工具授权，按角色下发。旧版子 Agent 的 `tools` 名单需要分别迁移到新的工具授权。
 
 任务内可通过 `publish_event` 向 DiOS 提交事件。插件先检查事件目录和来源规则，每次工具调用最多提交一次，且不会重试。部署环境用 `DIOS_API` 指定 DiOS 地址，默认 `http://backend:8000`。插件可从任务容器环境读取专用于事件 API 的 `DIAGENT_EVENT_ACCESS_TOKEN`，以 Bearer 形式发送。全局令牌 `DIOS_ACCESS_TOKEN` 只配置在 DiOS backend。启用该鉴权的环境需要先接通限权事件凭据或可信网关，并验证实际注入和发布行为。
 

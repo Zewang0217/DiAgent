@@ -19,6 +19,7 @@ v0.1 的交付目标是用 TypeScript + DSH 完整替代现有 DiAgent。一次�
 - [x] 统一验收覆盖常驻 A2A 镜像切换与回滚、旧 DiOS 会话续聊、受管 Chat 的 Shell、Skills、MCP、事件审批，以及独立 API 的进程重启和结果回收。常驻回滚使用兼容模式和模拟模型。另用一条合成提示验证真实 `ecnu-max` 经 DiOS 代理完成 SSE，常驻容器无供应商密钥和模型目录文件。
 - [ ] 目标环境验收。在发布候选镜像 digest 后，用目标的 MCP、业务凭据和存量配置完成切换与回滚。具名 `subagents`、执行器内 `cron/interval` 和旧 checkpoint 配置仍需按存量调用核实迁移方式。
 - [x] 核对本机存量配置并补齐试点步骤。DiOS 本机 SQLite 有 0 个 Agent 和 0 条订阅。旧 DiAgent 的独立任务示例配置了三个具名子 Agent。目标环境的只读盘点、两张镜像的切换与回滚步骤见 [目标环境验收](2026-11-reviewer-cutover.md)。
+- [x] 验证具名子 Agent 的 DSH 迁移路径。锁定版 Linux 镜像通过两轮模拟模型验证，主 Agent 能按名委托 reviewer，子会话收到专用角色提示，主 Agent 收到子结果。仅追加 preset 时子模型仍看得到宿主工具。证据和兼容方案见 [具名子 Agent 迁移验证](research/2026-11-dsh-named-subagent-migration.md)。
 - [x] DiAgent 本地 Compose 和 DiOS 开发配置统一使用 DSH 的 `task`、`service` 构建目标。两个入口均成功构建镜像，DiOS 的镜像标签和容器网络与 Compose 展开结果一致。两路评审后修复了默认任务样例和网络配置。默认样例在容器内通过解析，Linux 镜像中任务 11 项、服务 3 项测试通过。Windows 原生单轮服务测试返回 502，待单独定位。目标环境切换继续按下方验收项执行。
 - [x] 支持 DiOS 下发的 `max_tool_rounds`。Windows 与 Linux 集成测试各 11 项通过，真实 DSH 对同一步的两次 MCP 调用只扣一个轮次，下一步超额调用未到达模拟工具。双评审通过。使用 AI4R Reviewer 配置脚本中的 `recursion_limit=120`、`max_tool_rounds=20`，本机 DiOS 调度 Linux 镜像成功回收模拟任务 `acc24a8df62d` 的产物。
 - [x] 完成本地 AI4R Reviewer `once` 新旧镜像对照。用同一份合成草稿、仓库 Reviewer 提示词和 `ecnu-max` 顺序运行两次。旧 Python 和新 DSH 均退出 0、写出 `review.md` 和 `task_result.md`，并各在隔离 DiOS 登记一条 `ai4r.review.completed`。两份报告均指出缺少样本量、基线定义不清，最终答复均为 `changes_requested`。另用模拟模型完成五项对照，模型返回 HTTP 400 时两版均退出 1 且无新事件，重新选用旧镜像后成功。
@@ -41,17 +42,23 @@ v0.1 的交付目标是用 TypeScript + DSH 完整替代现有 DiAgent。一次�
 
 - [x] 常驻 Chat 接受 DiOS 随请求发送的纯文本历史。Linux 服务 HTTP 回归通过，隔离 DiOS 使用 `/api/apps/chat/completions` 连续两次请求同一会话，模拟模型核对第二次收到之前的用户/助手消息及本轮消息，角色和顺序一致。
 - [ ] 用实际存量工具名验收 `task.tools`。对会被 DSH 改写或产生名称歧义的配置，需在 MCP 发现时按原始名称选择。
-- [ ] 完成 task 配置映射。核对剩余存量模型配置和 `subagents` 调用。验收依赖 Shell 登录环境、输出截断行为或其他业务凭据的存量任务。在目标环境用实际 Git 工作流验证鉴权。
+- [x] 一次性任务入口支持具名委托。锁定版 Linux DSH 回归覆盖 reviewer 沿用任务模型、只读角色被拒绝写入、仅子 Agent 有写权限时将报告写入任务产物目录、主 Agent 收到子结果、无工具子 Agent。代码和架构评审确认复用现有运行器和权限过滤。评审后补齐省略父工具名单的兼容，并用子 Agent 的 `tool_selection.tool_ids` 区分原生文件权限与旧 MCP 工具名单。
+- [x] DiOS 下发具名子 Agent 配置。在 Agent 能力 JSON 保存独立工具名单，通过 A2A 下发私有任务配置。代码与架构评审完成。隔离 Docker 任务 `a8d83f7aff4a458e824c55f2ec2cf7bd` 中主 Agent 只获得委托和等待工具，reviewer 只获得 `write`，父子沿用同一模拟模型。reviewer 写出报告，DiOS 登记 `completed` 并收回 `task_result.md`。
+- [x] 接入具名子 Agent 的独立 Skills 和 MCP。隔离 Docker 任务 `5c84c0a3f0f4402796a846620afd086a` 验证三个角色使用同一模型，主 Agent 把两个 MCP 角色的结果交给 reviewer。上游只收到各角色获准的一次调用。reviewer 加载专用 Skill 并写出附加报告，DiOS 登记主结果。重复演练模拟子角色推理失败，任务 `d40c62eca632496a8ef8114f5411c433` 的主 Agent 收到失败通知并正常收尾，两次任务的四张角色 MCP 授权都撤销。两路评审后收紧主 Shell 组合及独立 HTTP 对子角色配置的校验。
+- [x] 在 DiOS 回收并展示附加 Markdown 报告。任务 `09bdd6bdcdd2458ea8619dfb57de983f` 使用本地 DSH 容器与模拟模型，验证 A2A 登记 `task_result.md` 和 `reviewer-report.md`，通过鉴权下载，并在 Chromium 的活动总览打开任务、预览并下载字节一致的报告。后端回归验证工作区后续改动、其他运行目录、链接和无效文件不会污染产物快照。两路评审完成，活动查询只取元数据和产物数，抽屉支持刷新。
+- [ ] 按目标环境使用情况核对旧版子工具名单、上游会话、取消与预算耗尽时的边界。
+- [ ] 核对依赖 Shell 登录环境、输出截断行为或其他业务凭据的存量任务。在目标环境用实际 Git 工作流验证鉴权。
 - [x] TypeScript 常驻 HTTP 入口提供 `GET /health`。Node.js 24 实际 HTTP 测试确认返回 200 和旧版健康响应。隔离 Linux 容器用实际入口验证从容器网络地址访问端口 8000。代码和设计评审通过。
 - [x] 常驻入口接通非流式、无工具单轮 Chat。用 DiOS A2A 请求形状通过实际 HTTP 和 DSH 验证角色、模型、无工具列表及 `choices[0].message.content`。
 - [x] 新增 DSH 常驻服务镜像构建目标，默认构建仍为一次性任务镜像。隔离的本机 DiOS 启动并探测常驻容器，同一容器完成两次无工具 A2A 请求并登记 `reply`，模拟模型错误时登记 `failed`。代码与设计评审通过。
-- [ ] 验证模型省略场景。DiOS 的 A2A service 当前只按模型显示名查找，模型 ID 或实际模型名可能导致请求省略 `model`。多模型配置需要明确默认模型或修正 DiOS 查找。
+- [x] 复验常驻 A2A 的存量模型引用。在注册两个模型的测试库中，Agent 以模型 ID、配置名或供应商模型名保存引用，DiOS 都向 DiAgent 显式下发正确模型。模型代理相关 15 项回归通过。
 - [x] 提供独立任务提交入口。外部调度器通过 HTTP 提交、轮询状态、下载产物。隔离 Docker 中未启动 DiOS，外部调用方提交文件，DSH 经模拟模型加载 Skill 并调用 MCP，宿主机 API 重启后使用原任务 ID 下载结果并确认容器已回收。独立接口 5 项通过，Linux 全套 38 项通过。双评审后修复 `created` 容器长期停在 `starting`、工作区覆盖部署配置及供应商凭据随 profile 挂载的问题。单控制器和重复提交语义见 [README](../README.md#独立任务-http-接口)。
 - [x] 接通无工具文本 SSE。Linux 服务回归 7 项、共享运行时的一次性任务回归 11 项通过。隔离 DiOS 的 Chat API 两轮流式对话保持历史顺序。模型完成前可收到首段，正常完成发送 `stop` 和 `[DONE]`，首段后断流发送错误帧并阻止模型重试。文本在临时会话内使用 DSH 实验性插件记录进入 SDK 通道，升级 DSH 时复验。HTTP 写入等待 `drain`，SDK 队列的慢客户端负载待验证。
 - [x] 接通在线 Chat 的 `tool_selection.tool_ids`。隔离的本机 DiOS 通过 Chat API 发起两轮流式对话，模拟模型只收到 DiOS 下发的 `shell` 和 `publish_event`。Linux 服务 13 项、Windows 平台限制 1 项、一次性任务 11 项通过。服务测试独立验证真实 Shell 执行和向模拟 DiOS 单次提交事件。
 - [x] 补齐在线 Shell 的模型凭据检查。拒绝使用部署环境中的模型 key，或在切换模型目录后仍保留带 key 的工作区 `models.yaml` 的 Shell 请求。纯问答继续使用部署凭据鉴权。两个新增用例均先复现 HTTP 200 再验证 HTTP 400，Linux 常驻服务回归 15 项通过，代码和设计评审完成。
 - [x] 接通常驻服务的受管推理。DiOS 保管供应商密钥，向 Chat 与常驻 A2A 发放绑定 Agent 与模型的单轮限额授权。真实 DSH Docker 容器经 DiOS 转发到模拟供应商完成 SSE、Shell 续轮和 A2A 结果登记，容器环境与工作区未下发供应商密钥或模型目录。DiAgent Linux 服务回归 16 项通过。[DiOS 草稿 PR #62](https://github.com/HQIT/DiOS/pull/62)
-- [ ] 在目标环境用实际模型、MCP 和事件凭据复验受管推理，清理旧工作区和备份中的历史模型及 MCP 凭据，并验证回滚。一次性任务的模型交付仍使用现有契约。
+- [ ] 在目标环境用实际模型、MCP 和事件凭据复验常驻与一次性任务的受管推理，清理旧工作区和备份中的历史模型及 MCP 凭据，并验证回滚。
+- [x] 在隔离的本地 Docker 用真实 `ecnu-max` 凭据验收一次性任务刷新。任务 `8cd5a197fbd64ae8b4f54782dc79933f` 执行一次 Shell，完成两次真实模型请求，两次请求之间成功换发令牌，并回收了预期文本。访问令牌设为 2 秒，模型凭据配置存于验收 DiOS 容器的内存文件系统。
 - [x] 常驻 Chat 发送工具开始、结果、失败与事件审批提示。工具前文字使用 `reasoning_content`，DiOS 只保存正式回答。旧 Shell CLI 确认提示独立分帧，并按当前会话显示。Linux 服务 20 项、DiOS 后端 59 项和前端构建通过，覆盖客户端主动断开、并发流和会话所属 Agent 校验。代码与设计评审完成。
 - [x] 受管 Chat 和常驻 A2A 装配按 Agent 分配的 Skills。隔离 Docker 联调验证文件型 Skill 的附属文件、控制台录入的 Skill 清单与未分配目录排除。目录只读挂载，随 Agent 重建更新分配。DSH 复用一次性任务的 Skill 发现逻辑。
 - [x] 受管 Chat 和常驻 A2A 装配按 Agent 授权的 Streamable HTTP MCP。隔离 Docker 中模型只看到并调用获准 `lookup`，容器没有 `mcp_servers.json` 或上游 MCP 凭据。接口回归验证空工具名单、工具发现和调用过滤、上游会话 ID 绑定及轮次撤销。已绑定会话在轮次结束时有界关闭。
@@ -61,9 +68,15 @@ v0.1 的交付目标是用 TypeScript + DSH 完整替代现有 DiAgent。一次�
 
 ## 后续方向
 
-- [ ] 统一 Task 与 Chat 的 profile 装配，内置一次性任务、常驻对话两套默认配置。先验证基础纯文本无工具，再验证相同镜像的两条入口各自只公开获准工具。配置清单见 [架构设计](2026-11-diagent-dsh-architecture.md#基础与两种默认配置)。
+- [x] 统一 Task 与 Chat 的 profile 生成。保留现有 DSH 装配和各入口的能力规则。默认 Chat 的空工具和 Skills 配置测试先失败再通过。用新旧 Linux 镜像比较两种 Task 配置，生成的补丁逐字一致。Linux 全套 39 项通过，1 项仅在非 Linux 运行，代码与设计评审完成。配置清单见 [架构设计](2026-11-diagent-dsh-architecture.md#基础与两种默认配置)。
 
-- [ ] 支持 DiOS 为每个 Agent 选择要注册的 DiAgent 插件。DiOS 保存并下发插件选择，DiAgent 按选择装配已部署的插件。验收同一 DiOS 下两个 Agent 各自只获得自己配置的插件。
+- [x] DiOS 为受管 Chat 和常驻 A2A 保存每个 Agent 的 `capabilities.diagent_tools`，复用 DiAgent 的工具选择和轮次授权。Docker 验收覆盖同一镜像中两个 Agent 的工具差异及更新后下一轮生效，容器继续复用。DiOS 后端 67 项测试与前端构建通过。代码和设计评审后补齐 MCP 服务保存校验与控制台错误反馈。
+- [x] 一次性 Task 接入按 Agent 配置工具。显式名单支持 `skill`、`mcp` 和 `publish_event`，旧 `task.tools` 继续过滤 MCP 名称。Docker 验收中，空名单任务不向模型提供工具，另一任务只提供注册的内联 Skill 与 E2AG 放行的 `lookup`，两项产物均由 DiOS 回收。启动配置进入目标容器私有目录，未写入工作区。双评审完成，DiOS 后端 69 项通过，Linux DiAgent 回归 39 项通过、1 项仅非 Linux 运行。
+- [x] 一次性 Task 复用 DiOS 模型代理。Docker 验收跑通真实 DSH 的纯问答与 Skill/MCP 任务，确认模拟供应商密钥和地址未进容器，任务完成后的授权返回 401。DiOS 后端 72 项通过，覆盖错误模型、取消、启动中的取消竞争，以及已签发授权但尚未启动的容器在重启后回收。代码与设计评审完成。
+- [x] 对齐受管 Task 的推理授权与任务超时，额外留 2 分钟供容器启动。双评审后补齐到期与扣减额度竞态，验证两小时任务在第 121 分 59 秒仍可推理，截止时返回 401，耗尽额度返回 429。最终模型代理 14 项回归和本地 DSH Docker 验收通过。
+- [x] 受管 Task 使用独立刷新凭据换发访问令牌，并继续原 DSH 会话。DiOS 保留模型、剩余额度和任务截止，任务终态撤销授权。两个工作区的最终 Docker 验收使用 2 秒访问令牌完成纯问答、MCP 和 Shell 三项任务，共成功换发 5 次。接口验证取消后拒绝刷新，DiOS 后端 74 项通过。
+- [x] 开启 Task 模型代理和刷新后，支持显式授予 `shell`、`read`、`write` 和 `edit`。Linux DSH 验收覆盖 Shell 和工作区读写，拒绝原生文件工具访问工作区外目标；Shell 继承不到刷新文件路径，DiOS 产物收集拒绝符号链接。代码和设计评审完成。文件工具的前置校验与 DSH 实际打开仍分两步。
+- [ ] 补齐兼容模式一次性任务的启动恢复，并复核已分配给 Task 的 Skill 改名或删除时的行为。受管推理下已签发授权的启动窗口已有恢复覆盖。
 - [ ] 评估同一次任务的多个 Agent 共用容器。届时验证子任务的上下文、工具权限、文件读写和失败处理。暂缓实现。
 
 ## 已验证的本地基线

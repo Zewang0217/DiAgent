@@ -1,6 +1,6 @@
 # DiOS 与 DiAgent v0.1 系统设计图
 
-本文用 UML 展示 DiOS 如何调用 DiAgent，以及两条入口如何共用执行逻辑。组件图标记了下一阶段的共享配置装配方案，其他图说明现有调用契约。插件名单见 [基础与两种默认配置](2026-11-diagent-dsh-architecture.md#基础与两种默认配置)。
+本文用 UML 展示 DiOS 如何调用 DiAgent，以及两条入口如何共用执行与 profile 生成。DiOS 在受管 Chat、常驻 A2A 和一次性 Task 按 Agent 下发工具名单，DiAgent 在每次生成 profile 时应用。插件名单见 [基础与两种默认配置](2026-11-diagent-dsh-architecture.md#基础与两种默认配置)。
 
 ## 1. 系统黑盒
 
@@ -35,7 +35,7 @@ DiAgent 是交付单元，包含 TypeScript 入口、SDK、固定版本的 DSH�
 
 ![DiAgent 一次性任务 UML 时序图](diagent-v0.1-diagrams/03-task-sequence.svg)
 
-DiOS 写任务和授权配置，Docker 传入 `TASK_CONFIG`，DiAgent 经 SDK 驱动 DSH。DSH 加载选中的 Skills 并执行获准工具。最终回答和日志由 Task 入口落盘，DiOS 通过退出码和文件登记结果。具名子 Agent 的存量配置另行核对。 [配置生成及产物读取](https://github.com/HQIT/DiOS/blob/f2433d950925b773ae33e7c50cb0579dea1d4115/backend/app/services/a2a_service.py#L287)
+DiOS 写任务和授权配置，Docker 传入 `TASK_CONFIG`，DiAgent 经 SDK 驱动 DSH。DSH 加载选中的 Skills 并执行获准工具。最终回答和日志由 Task 入口落盘，DiOS 通过退出码和文件登记结果。受管任务可由 DiOS 下发具名子 Agent 配置，DSH 在任务内部创建子会话并将结果回传到主会话，DiOS 回收主任务的 `task_result.md`。 [配置生成及产物读取](https://github.com/HQIT/DiOS/blob/f2433d950925b773ae33e7c50cb0579dea1d4115/backend/app/services/a2a_service.py#L287) · [具名委托配置](../README.md#typescript--dsh-一次性任务试点)
 
 [SVG](diagent-v0.1-diagrams/03-task-sequence.svg) · [PlantUML](diagent-v0.1-diagrams/03-task-sequence.puml)
 

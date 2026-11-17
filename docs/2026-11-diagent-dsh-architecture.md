@@ -16,15 +16,15 @@
 
 ## 2. 模块拆分
 
-目标设计采用一种 Agent。Task 与 HTTP 是调用入口，一次任务和一次对话共用 `runDshTurn`。当前两张镜像的运行层相同，各入口仍各自组装 profile。下一步先统一装配，独立验收后再决定是否合并镜像入口。
+目标设计采用一种 Agent。Task 与 HTTP 是调用入口，共用 `runDshTurn` 和 profile 生成模块。当前两张镜像的运行层相同。Task 与 Chat 分别保留已验证的能力规则，共用模型路由、角色、Skills 发现、Bash 参数、上报开关与补丁写入。按 Agent 的配置分配和镜像入口合并可独立推进。
 
 ### 基础与两种默认配置
 
-每次运行依次合并 **基础 → 调用方式默认项 → 部署方或 DiOS 为本次运行授权的能力**。基础默认没有模型可见的业务工具。下表中的插件 ID 指向当前已有的实现，表中组合是下一阶段的设计。
+目标装配顺序是 **基础 → 调用方式默认项 → 部署方或 DiOS 为本次运行授权的能力**。保留完整的 DSH 运行层。基础配置的业务工具列表默认为空，调用方式和授权决定具体工具。下表中的插件 ID 指向已有实现，Task 与 Chat 目前继续使用各自的兼容规则。
 
 | 配置 | 加载的运行插件 | 入口职责与默认权限 |
 | --- | --- | --- |
-| 初始基础 | `llm-pi-ai` 接模型，`system-prompt` 注入角色，`diagent-task-temperature` 传递模型温度。允许列表校验由两个入口共用，现有 `diagent-chat-tool-selection` 可作为实现参考。 | 完成纯文本运行，默认只读，模型可见工具列表为空。 |
+| 初始基础 | `llm-pi-ai` 接模型，`system-prompt` 注入角色，`diagent-task-temperature` 传递模型温度。Task 与 Chat 复用 `diagent-tool-selection` 将显式名单应用到 DSH。 | 完成纯文本运行，显式空名单使用只读策略，模型可见工具列表为空。 |
 | 一次性任务默认 | 有工具轮次预算时追加 `diagent-tool-round-limit`。 | 入口准备工作区、产物目录，管理超时、日志和退出码。入口可以写日志和最终结果，Agent 写文件所需的工具与权限仍按本次授权配置。 |
 | 常驻对话默认 | 请求携带历史时追加 `diagent-chat-history`。纯文本 SSE 需要逐段输出时追加 `diagent-chat-stream`。 | HTTP 入口返回 JSON 或 SSE。带工具的运行通过事件映射输出工具进度。每轮单独解析模型、上下文和权限，容器可以复用。 |
 
@@ -38,7 +38,7 @@
 | Shell | `bash-sandbox`、`tool-bash` 和旧接口适配 `diagent-legacy-shell`。 |
 | 业务事件 | `diagent-publish-event`，附带本次允许的事件发布凭据。 |
 
-初期由 DiAgent 内置这两套默认配置。后续 DiOS 可以新增、保存和分配业务配置，配置引用已部署的插件 ID、参数和资源。DiAgent 按同一规则解析组合，未知插件 ID 或超出授权的能力返回明确错误。
+初期由 DiAgent 内置这两套默认配置。受管 Chat、常驻 A2A 和一次性 Task 从 DiOS 的 `capabilities.diagent_tools` 取得名单，映射到各入口的 `tool_selection.tool_ids`。一次性 Task 可显式选择 Skills、MCP 和事件发布，模型代理与刷新均开启时也可选择 Shell 和文件工具。MCP 继续由 E2AG 签发单任务授权。省略字段沿用各入口的兼容默认值，显式空名单只做问答。DiOS 按对话轮次和任务终态撤销模型授权。开启 Task 刷新后，由独立 UID 的本地推理代理在访问令牌过期时向 DiOS 换发，DiOS 继续使用任务原有的模型绑定、调用额度和绝对截止。可复用业务配置的新增、保存和分配由后续 DiOS 实现。
 
 迁移时先用旧入口的兼容映射覆盖已验收的行为。例如旧 task 入口仍有默认启用事件的约定，切换到零业务工具的基础前要把这项能力显式写入旧调用的配置。先验证纯文本请求工具列表为空，再用同一个镜像分别运行任务与 Chat，确认两边都只看到各自授权的工具。
 
@@ -49,7 +49,7 @@
 | 配置 | 解析现有模型配置、角色提示、workspace、Skills、MCP、工具白名单与预算，生成本次启动所需的 DSH 配置。只把明确兼容的字段映射过去。 | `src/config/` |
 | DSH 运行模块 | 执行一次 DSH 会话，管理 SDK 初始化、通知订阅、终态、截止时间及子进程清理。调用方消费最终结果和运行事件。 | `src/dsh/` |
 | DiAgent 插件 | 实现业务工具和协议适配，按每次运行的生效配置加载。 | `src/dsh/plugins/` |
-| 运行配置与打包 | 固定 SDK、DSH、Node、插件及依赖，校验生效的插件列表。 | `src/dsh/profile.ts`、`docker/`、`package-lock.json` |
+| 运行配置与打包 | 集中生成两种入口的 DSH 补丁。固定 SDK、DSH、Node、插件及依赖。 | `src/dsh/profile.ts`、`docker/`、`package-lock.json` |
 
 DSH 运行模块统一处理 SDK 细节。Task 和 HTTP 调用者拿到的是运行结果和必要事件；现有 Python 版作为独立镜像保留，用于对照和回滚。等第二个真实内核需要接入时，再决定是否抽象出通用运行时接口。
 
@@ -134,4 +134,4 @@ flowchart LR
 
 实施顺序是 **镜像与 profile 冒烟 → 一次性任务验收 → 在线服务与存量调用兼容验收 → 按部署切换**。DiOS 沿用现有的 task 和 service 镜像配置。两类入口通过验收后均使用 TypeScript + DSH，旧 DeepAgents 镜像用于回滚。部署验收优先验证保持镜像标签时，DiOS 持续运行，新任务使用更新后的镜像。修改 Compose 中的镜像选择环境变量时，用原数据库和工作区重新创建 DiOS backend 容器。 [DiOS 镜像配置](https://github.com/HQIT/DiOS/blob/f2433d950925b773ae33e7c50cb0579dea1d4115/backend/app/config.py#L13)
 
-现有 task、Chat 和 A2A 已有本地容器验收记录。共享 profile 装配与两套默认配置是下一项实现内容。目标环境切换按 [验收指南](2026-11-reviewer-cutover.md) 执行。
+目标环境切换按 [验收指南](2026-11-reviewer-cutover.md) 执行。
