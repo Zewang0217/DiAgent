@@ -1,10 +1,9 @@
 /** 将调用方提供的 Chat 历史和工具选择映射到独立 DSH 会话。 */
 import { randomUUID } from 'node:crypto';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
-import { mcpProfileRows, modelProfileRow, selectedSkillRoots } from '../dsh/profile.js';
+import { mcpProfileRows, writeChatProfile } from '../dsh/profile.js';
 import type { ChatHistoryMessage } from '../dsh/plugins/chat-history.js';
 import { runDshTurn } from '../dsh/task-runtime.js';
 import { parseModelConfig, TaskConfigError, type TaskConfig } from '../task/config.js';
@@ -240,42 +239,14 @@ export async function completeChat(
   const sendStream = request.stream === true && onStream;
   const hasTools = builtInTools.length > 0 || mcpPlugins.length > 0;
   const sendDelta = !hasTools && sendStream;
+  const personaPrefix = system.length > 0 ? system.join('\n') : env.AGENT_SYSTEM_PROMPT || '你是用户的助理。';
   let streamedText = '';
-  const content = await runDshTurn({ workspace, prompt, model, stepLimit: 100 }, async home => {
-    const profile = join(home, 'chat.cordis.yml');
-    const skillRoots = await selectedSkillRoots(resolve(workspace, env.SKILLS_DIR || 'skills'), skillNames, home);
-    const personaPrefix = system.length > 0 ? system.join('\n')
-      : env.AGENT_SYSTEM_PROMPT || '你是用户的助理。';
-    await writeFile(profile, JSON.stringify([
-      modelProfileRow(model),
-      { id: 'system-prompt', config: { personaPrefix } },
-      { id: 'skill-filesystem', config: { includeDefaultRoots: false, customSkillDirs: skillRoots, watch: false } },
-      ...(hasShell ? [
-        { id: 'bash-sandbox', config: { maxTimeoutMs: 1_800_000 } },
-        { id: 'tool-bash', config: { promoteOnTimeout: false } },
-      ] : []),
-      ...['session-log-deepseek', 'session-telemetry-otel', 'plugin-package-inventory-deepseek']
-        .map(id => ({ id, disabled: true })),
-      { insert: [
-        ...mcpPlugins,
-        ...(hasShell ? [{ id: 'diagent-legacy-shell',
-          name: fileURLToPath(new URL('../dsh/plugins/legacy-shell.js', import.meta.url)),
-          config: { bashDelegationOnly: true } }] : []),
-        ...(hasEventTool ? [{ id: 'diagent-publish-event',
-          name: fileURLToPath(new URL('../dsh/plugins/publish-event.js', import.meta.url)) }] : []),
-        { id: 'diagent-chat-tool-selection', name: fileURLToPath(new URL('../dsh/plugins/chat-tool-selection.js', import.meta.url)),
-          config: { toolIds: builtInTools, mcpServerNames: mcpPlugins.map(plugin => plugin.config.serverName) } },
-        ...(history.length > 0 ? [{ id: 'diagent-chat-history',
-          name: fileURLToPath(new URL('../dsh/plugins/chat-history.js', import.meta.url)),
-          config: { history, personaPrefix } }] : []),
-        ...(sendDelta ? [{ id: 'diagent-chat-stream',
-          name: fileURLToPath(new URL('../dsh/plugins/chat-stream.js', import.meta.url)) }] : []),
-        { id: 'diagent-task-temperature', name: fileURLToPath(new URL('../dsh/plugins/task-temperature.js', import.meta.url)),
-          config: { temperature } },
-      ] },
-    ]), { mode: 0o600 });
-    return profile;
-  }, signal, () => {}, {
+  const writeProfile = (home: string) => writeChatProfile({
+    model, personaPrefix, temperature, skillNames, mcpPlugins, history,
+    skillsDir: resolve(workspace, env.SKILLS_DIR || 'skills'),
+    toolIds: builtInTools, streamText: Boolean(sendDelta),
+  }, home);
+  const content = await runDshTurn({ workspace, prompt, model, stepLimit: 100 }, writeProfile, signal, () => {}, {
     toolEnv: {
       DIOS_API: hasEventTool ? env.DIOS_API : '',
       DIAGENT_EVENT_ACCESS_TOKEN: hasEventTool ? env.DIAGENT_EVENT_ACCESS_TOKEN : '',

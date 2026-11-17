@@ -5,7 +5,9 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { TaskConfig } from '../task/config.js';
+import { openTaskModelBridge } from '../task/model-bridge.js';
 import { writeTaskProfile } from './profile.js';
 import { textDeltaRecord } from './plugins/chat-stream.js';
 
@@ -21,13 +23,19 @@ export async function runDshTask(
   signal: AbortSignal,
   log: (message: string) => void,
 ): Promise<string> {
-  return runDshTurn(config, home => writeTaskProfile(config, home, runDirectory), signal, log, {
+  const credentialFile = process.env.DIAGENT_TASK_MODEL_REFRESH_PATH;
+  await using bridge = credentialFile ? await openTaskModelBridge(config.model, credentialFile, signal) : undefined;
+  const execution = bridge ? { ...config, model: bridge.model } : config;
+  const writesWorkspace = config.toolIds === undefined || config.toolIds.some(id => ['shell', 'write', 'edit'].includes(id))
+    || config.subagents.some(role => role.toolIds.some(id => ['write', 'edit'].includes(id)));
+  return await runDshTurn(execution, home => writeTaskProfile(execution, home, runDirectory), signal, log, {
+    dshBin: bridge ? fileURLToPath(new URL('./task-child.js', import.meta.url)) : undefined,
     toolEnv: {
-      DIOS_API: process.env.DIOS_API || 'http://backend:8000',
-      DIAGENT_EVENT_ACCESS_TOKEN: process.env.DIAGENT_EVENT_ACCESS_TOKEN ?? '',
-      GIT_PLATFORM_TOKEN: process.env.GIT_PLATFORM_TOKEN ?? '',
+      DIOS_API: config.isDiosEventPublishingEnabled ? process.env.DIOS_API || 'http://backend:8000' : '',
+      DIAGENT_EVENT_ACCESS_TOKEN: config.isDiosEventPublishingEnabled ? process.env.DIAGENT_EVENT_ACCESS_TOKEN : '',
+      GIT_PLATFORM_TOKEN: config.toolIds === undefined || config.toolIds.includes('shell') ? process.env.GIT_PLATFORM_TOKEN : '',
     },
-    permissionMode: 'workspace-write',
+    permissionMode: writesWorkspace ? 'workspace-write' : 'read-only',
   });
 }
 
@@ -37,9 +45,10 @@ export async function runDshTurn(
   writeProfile: (home: string) => Promise<string>,
   signal: AbortSignal,
   log: (message: string) => void,
-  { toolEnv, permissionMode = 'read-only', onTextDelta, onToolStreamEvent }: {
+  { toolEnv, permissionMode = 'read-only', onTextDelta, onToolStreamEvent, dshBin }: {
     toolEnv?: Pick<NodeJS.ProcessEnv, 'DIOS_API' | 'DIAGENT_EVENT_ACCESS_TOKEN' | 'GIT_PLATFORM_TOKEN'>;
     permissionMode?: 'workspace-write' | 'read-only';
+    dshBin?: string;
     onTextDelta?: (text: string) => Promise<void>;
     onToolStreamEvent?: (event: SessionEvent<'assistant/message' | 'tool/call' | 'tool/result'>) => Promise<void>;
   } = {},
@@ -49,6 +58,7 @@ export async function runDshTurn(
     const patch = await writeProfile(home);
     signal.throwIfAborted();
     await using harness = new DeepSeekHarness({
+      dshBin,
       dshHome: home,
       profile: 'sdk',
       patches: [patch],
@@ -58,6 +68,7 @@ export async function runDshTurn(
       processCwd: config.workspace,
       env: {
         ...process.env,
+        DIAGENT_TASK_MODEL_REFRESH_PATH: '',
         // 空值也显式传递，阻止工作区 .env 注入未授予本轮工具的凭据。
         DIOS_API: toolEnv?.DIOS_API ?? '',
         DIAGENT_EVENT_ACCESS_TOKEN: toolEnv?.DIAGENT_EVENT_ACCESS_TOKEN ?? '',

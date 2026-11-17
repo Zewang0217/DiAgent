@@ -1,7 +1,7 @@
 /** 通过真实 DSH 子进程验证一次性任务，模型和 MCP 服务使用本机模拟端点。 */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtempDisposable, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtempDisposable, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -10,40 +10,102 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 const project = fileURLToPath(new URL('../', import.meta.url));
 
-test('DSH task preserves the input, MCP and result contract with DiOS events disabled', { timeout: 90_000 }, async () => {
+function namedReviewReply(messages) {
+  const childPersona = messages.find(message => message.role === 'system'
+    && message.content?.includes('Reviewer fixture persona'));
+  const toolResults = messages.filter(message => message.role === 'tool').map(message => message.content);
+  if (childPersona) {
+    if (toolResults.length) return 'reviewer-result: ' + toolResults.join('\n');
+    if (childPersona.content.includes('Use assigned Skill fixture')) {
+      return [['skill', { name: 'review-skill' }], ['skill', { name: 'smoke-skill' }]];
+    }
+    if (childPersona.content.includes('Write an artifact fixture')) {
+      const runDirectory = childPersona.content.match(/本次任务的产物目录：([^\n]+)/)?.[1];
+      if (!runDirectory) return 'reviewer-result: missing run directory';
+      return [['write', { file_path: join(runDirectory, 'reviewer-report.md'), content: 'reviewer artifact fixture' }]];
+    }
+    return [
+      ['read', { file_path: 'skills/smoke-skill/SKILL.md' }],
+      ['write', { file_path: 'unauthorized-review.txt', content: 'must not be written' }],
+    ];
+  }
+  const reviewCompletion = messages.find(message => message.role === 'user' && message.content?.includes('reviewer-result:'));
+  if (reviewCompletion) {
+    return reviewCompletion.content;
+  }
+  return toolResults.length ? [['wait_agent', { timeout_ms: 10000 }]]
+    : [['delegate_reviewer', { name: 'reviewer', description: 'Review fixture file', prompt: 'Review the fixture file.' }]];
+}
+
+function namedMcpReply(messages) {
+  const role = messages.find(message => message.role === 'system')
+    ?.content?.match(/MCP child (alpha|beta)/)?.[1];
+  const results = messages.filter(message => message.role === 'tool').map(message => message.content);
+  if (role) {
+    return results.length ? `${role}-result: ${results.join('\n')}` : [
+      [`mcp__scope__${role}`, {}], [`mcp__scope__${role === 'alpha' ? 'beta' : 'alpha'}`, {}],
+    ];
+  }
+  const alpha = messages.find(message => message.role === 'user' && message.content?.includes('alpha-result:'));
+  const beta = messages.find(message => message.role === 'user' && message.content?.includes('beta-result:'));
+  if (alpha && beta) return alpha.content + '\n' + beta.content;
+  const next = alpha ? 'beta' : 'alpha';
+  return results.includes(`started subagent ${next}`) ? [['wait_agent', { timeout_ms: 10000 }]]
+    : [[`delegate_${next}`, { name: next, description: 'Read the assigned source', prompt: 'Read your source.' }]];
+}
+
+test('DSH task preserves the input, MCP and result contract with DiOS events disabled', { timeout: 120_000 }, async () => {
   const cacheDir = join(project, '.cache');
   await mkdir(cacheDir, { recursive: true });
   await using scratch = await mkdtempDisposable(join(cacheDir, 'diagent-smoke-'));
+  await using outside = await mkdtempDisposable(join(cacheDir, 'diagent-outside-'));
   const workspace = scratch.path;
+  const outsideRead = join(outside.path, 'outside.txt');
+  await writeFile(outsideRead, 'fixture outside the workspace');
   const skillDirectory = join(workspace, 'skills', 'smoke-skill');
   await mkdir(skillDirectory, { recursive: true });
   await writeFile(join(skillDirectory, 'SKILL.md'),
     '---\nname: smoke-skill\ndescription: DiAgent smoke skill marker\n---\nTest instructions.\n');
+  const reviewSkillDirectory = join(workspace, 'skills', 'review-skill');
+  await mkdir(reviewSkillDirectory, { recursive: true });
+  await writeFile(join(reviewSkillDirectory, 'SKILL.md'),
+    '---\nname: review-skill\ndescription: Reviewer skill marker\n---\nReview Skill loaded.\n');
 
   const modelRequests = [];
   const mcpRequests = [];
+  const refreshCalls = [];
+  const refreshFile = join(workspace, 'refresh-private.json');
   const server = createServer(async (request, response) => {
     if (request.method !== 'POST') {
       response.writeHead(405).end();
+      return;
+    }
+    if (request.url === '/v1/grants/refresh') {
+      refreshCalls.push(request.headers.authorization === 'Bearer ' + 'r'.repeat(43));
+      response.writeHead(200, { 'Content-Type': 'application/json' })
+        .end(JSON.stringify({ access_token: 'a'.repeat(43) }));
       return;
     }
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString());
 
-    if (request.url === '/mcp') {
-      mcpRequests.push({ method: body.method, name: body.params?.name, authorization: request.headers.authorization });
+    if (['/mcp', '/mcp-alpha', '/mcp-beta'].includes(request.url)) {
+      const role = request.url.split('-')[1];
+      mcpRequests.push({ method: body.method, name: body.params?.name, authorization: request.headers.authorization, role });
       // 模拟工具发现晚于连接建立。测试直接检查模型首轮请求里的工具声明。
       if (body.method === 'tools/list') await delay(1500);
       const results = {
         initialize: { protocolVersion: body.params?.protocolVersion, capabilities: { tools: {} },
-          serverInfo: { name: 'smoke', version: '1' } },
-        'tools/list': { tools: [{ name: 'lookup', description: 'Look up a test value',
+          serverInfo: { name: 'smoke', version: '1' },
+          instructions: role ? `MCP instructions for ${role} only` : 'MCP instructions for parent only' },
+        'tools/list': { tools: role ? [{ name: role, description: 'Look up the role source',
+          inputSchema: { type: 'object', properties: {} } }] : [{ name: 'lookup', description: 'Look up a test value',
           inputSchema: { type: 'object', properties: {} } }, {
           name: 'unselected', description: 'An MCP tool excluded by task configuration',
           inputSchema: { type: 'object', properties: {} },
         }] },
-        'tools/call': { content: [{ type: 'text', text: 'mcp-ok' }] },
+        'tools/call': { content: [{ type: 'text', text: role ? `mcp-${role}-ok` : 'mcp-ok' }] },
       };
       if (body.id === undefined) {
         response.writeHead(202).end();
@@ -61,6 +123,14 @@ test('DSH task preserves the input, MCP and result contract with DiOS events dis
       response.writeHead(404).end();
       return;
     }
+    if (body.messages.some(message => message.content === 'refresh-smoke')) {
+      const isContinuation = body.messages.some(message => message.role === 'tool');
+      const expected = isContinuation ? 'a'.repeat(43) : 'smoke-model-key';
+      if (request.headers.authorization !== 'Bearer ' + expected) {
+        response.writeHead(401).end();
+        return;
+      }
+    }
     modelRequests.push(body);
     if (body.messages.some(message => message.role === 'user' && message.content === 'fail-smoke')) {
       response.writeHead(400, { 'Content-Type': 'application/json' })
@@ -71,6 +141,12 @@ test('DSH task preserves the input, MCP and result contract with DiOS events dis
     const toolResults = body.messages.filter(message => message.role === 'tool');
     const isBudgetTask = body.messages.some(message => message.role === 'user' && message.content === 'tool-budget');
     const isSelectionTask = body.messages.some(message => message.role === 'user' && message.content === 'selected-mcp');
+    const isTextTask = body.messages.some(message => message.role === 'user' && message.content === 'selected-task-tools');
+    const isManagedToolTask = body.messages.some(message => message.role === 'user' && message.content === 'managed-tools');
+    const isNamedReview = body.messages.some(message => message.content?.includes('Reviewer fixture persona')
+      || message.content === 'named-review');
+    const isNamedMcp = body.messages.some(message => message.content?.includes('MCP child ')
+      || message.content === 'named-mcp');
     const shellPrompt = body.messages.find(message => message.role === 'user' && message.content.startsWith('legacy-shell'));
     const isCredentialTask = shellPrompt?.content === 'legacy-shell-credentials';
     const isUnconfiguredCredentialTask = shellPrompt?.content === 'legacy-shell-unconfigured';
@@ -78,8 +154,17 @@ test('DSH task preserves the input, MCP and result contract with DiOS events dis
     const hasToolResult = toolResults.length > 0;
     const toolCall = { index: 0, id: 'call-smoke', type: 'function',
       function: { name: 'mcp__smoke__lookup', arguments: '{}' } };
-    const needsTool = isBudgetTask ? toolResults.length < 3 : !hasToolResult;
-    const toolCalls = isShellTask ? [{ index: 0, id: 'call-legacy-shell', type: 'function',
+    const reviewReply = isNamedReview ? namedReviewReply(body.messages) : isNamedMcp ? namedMcpReply(body.messages) : undefined;
+    const needsTool = isNamedReview || isNamedMcp ? Array.isArray(reviewReply)
+      : !isTextTask && (isBudgetTask ? toolResults.length < 3 : !hasToolResult);
+    const toolCalls = isManagedToolTask ? [
+      ['shell', { command: 'test -z "$DIAGENT_TASK_MODEL_REFRESH_PATH" && test ! -e refresh-private.json && printf shell-ok' }],
+      ['read', { file_path: 'skills/smoke-skill/SKILL.md' }],
+      ['read', { file_path: outsideRead }],
+      ['write', { file_path: 'managed-result.txt', content: 'authorized write' }],
+      ['write', { file_path: join(outside.path, 'rejected.txt'), content: 'must not be written' }],
+    ].map(([name, args], index) => ({ index, id: `call-managed-${index}`, type: 'function',
+      function: { name, arguments: JSON.stringify(args) } })) : isShellTask ? [{ index: 0, id: 'call-legacy-shell', type: 'function',
       function: { name: 'shell', arguments: JSON.stringify({
         command: isCredentialTask
           ? [
@@ -103,8 +188,13 @@ test('DSH task preserves the input, MCP and result contract with DiOS events dis
       : isSelectionTask ? [toolCall, { index: 1, id: 'call-unselected', type: 'function',
         function: { name: 'mcp__smoke__unselected', arguments: '{}' } }]
       : [{ ...toolCall, id: isBudgetTask ? 'call-smoke-next-round' : toolCall.id }];
-    const delta = needsTool ? { tool_calls: toolCalls } : {
-      content: isBudgetTask || isShellTask ? toolResults.map(message => message.content).join('\n') : 'pilot-ok',
+    const reviewCalls = Array.isArray(reviewReply) ? reviewReply.map(([name, args], index) => ({
+      index, id: `call-role-${body.messages.length}-${index}`, type: 'function',
+      function: { name, arguments: JSON.stringify(args) },
+    })) : undefined;
+    const delta = needsTool ? { tool_calls: reviewCalls ?? toolCalls } : {
+      content: reviewReply ?? (isBudgetTask || isShellTask || isManagedToolTask
+        ? toolResults.map(message => message.content).join('\n') : 'pilot-ok'),
     };
     const base = { id: 'chatcmpl-smoke', object: 'chat.completion.chunk', created: 1, model: 'smoke-model' };
     response.writeHead(200, { 'Content-Type': 'text/event-stream' });
@@ -159,12 +249,111 @@ test('DSH task preserves the input, MCP and result contract with DiOS events dis
     const [runDirectory] = await readdir(outputRoot);
     return {
       code, output,
+      runDirectory: join(outputRoot, runDirectory),
       result: await readFile(join(outputRoot, runDirectory, 'task_result.md'), 'utf8'),
       log: await readFile(join(outputRoot, runDirectory, 'task.log'), 'utf8'),
     };
   }
 
   try {
+    if (process.platform === 'linux' && process.getuid() === 0) {
+      await writeFile(refreshFile, JSON.stringify({ refresh_token: 'r'.repeat(43) }), { mode: 0o400 });
+      const refreshed = await run('refresh-smoke', 'refreshed', 'mcp.json', { tool_selection: { tool_ids: ['mcp'] } },
+        { DIAGENT_TASK_MODEL_REFRESH_PATH: refreshFile });
+      assert.equal(refreshed.code, 0, refreshed.output);
+      assert.equal(refreshed.result, 'pilot-ok');
+      assert.deepEqual(refreshCalls, [true]);
+      await assert.rejects(stat(refreshFile), { code: 'ENOENT' });
+      await writeFile(refreshFile, JSON.stringify({ refresh_token: 'r'.repeat(43) }), { mode: 0o400 });
+      const requestIndex = modelRequests.length;
+      const tools = await run('managed-tools', 'managed', '', { tool_selection: { tool_ids: ['shell', 'read', 'write'] } },
+        { DIAGENT_TASK_MODEL_REFRESH_PATH: refreshFile });
+      assert.equal(tools.code, 0, tools.output);
+      assert.deepEqual(modelRequests[requestIndex].tools.map(tool => tool.function.name).sort(), ['read', 'shell', 'write']);
+      assert.match(tools.result, /shell-ok/);
+      assert.match(tools.result, /Test instructions/);
+      assert.doesNotMatch(tools.result, /fixture outside the workspace/);
+      assert.equal(await readFile(join(workspace, 'managed-result.txt'), 'utf8'), 'authorized write');
+      await assert.rejects(stat(join(outside.path, 'rejected.txt')), { code: 'ENOENT' });
+      const reviewer = {
+        name: 'reviewer', description: 'Review the submitted artifact',
+        prompt: 'Reviewer fixture persona', tool_selection: { tool_ids: ['read'] },
+      };
+      const reviewOptions = {
+        recursion_limit: 12,
+        subagents: [reviewer],
+      };
+      const reviewRequestIndex = modelRequests.length;
+      await writeFile(refreshFile, JSON.stringify({ refresh_token: 'r'.repeat(43) }), { mode: 0o400 });
+      const review = await run('named-review', 'named-review', '', {
+        ...reviewOptions, tool_selection: { tool_ids: ['read', 'write'] },
+      }, { DIAGENT_TASK_MODEL_REFRESH_PATH: refreshFile });
+      const reviewRequests = modelRequests.slice(reviewRequestIndex);
+      assert.equal(review.code, 0, review.output + JSON.stringify(reviewRequests.map(request => ({
+        tools: request.tools?.map(tool => tool.function.name),
+        results: request.messages.filter(message => message.role === 'tool').map(message => message.content),
+      }))));
+      const childRequests = reviewRequests.filter(request => request.messages.some(message =>
+        message.role === 'system' && message.content?.includes('Reviewer fixture persona')));
+      const parentTools = reviewRequests[0].tools.map(tool => tool.function.name).sort();
+      assert.deepEqual(parentTools, ['delegate_reviewer', 'read', 'wait_agent', 'write']);
+      assert.ok(childRequests.length > 0, 'The model must receive the reviewer system prompt');
+      for (const request of childRequests) {
+        assert.deepEqual(request.tools.map(tool => tool.function.name), ['read']);
+        assert.equal(request.model, reviewRequests[0].model);
+        assert.ok(!request.messages.some(message => message.role === 'system'
+          && message.content?.includes('Smoke system prompt.')));
+      }
+      assert.match(JSON.stringify(reviewRequests[0].messages), /Review the submitted artifact/);
+      assert.match(review.result, /reviewer-result: .*Test instructions/s);
+      assert.match(review.result, /unknown tool "write"/);
+      await assert.rejects(stat(join(workspace, 'unauthorized-review.txt')), { code: 'ENOENT' });
+
+      const legacyRequestIndex = modelRequests.length;
+      await writeFile(refreshFile, JSON.stringify({ refresh_token: 'r'.repeat(43) }), { mode: 0o400 });
+      const legacyReview = await run('named-review', 'legacy-named-review', '', reviewOptions,
+        { DIAGENT_TASK_MODEL_REFRESH_PATH: refreshFile });
+      assert.equal(legacyReview.code, 0, legacyReview.output);
+      const legacyTools = modelRequests[legacyRequestIndex].tools.map(tool => tool.function.name);
+      assert.ok(legacyTools.includes('delegate_reviewer'));
+      assert.ok(legacyTools.includes('write'));
+      assert.ok(!legacyTools.includes('subagent') && !legacyTools.includes('subagent_fork'));
+      assert.match(legacyReview.result, /reviewer-result: .*Test instructions/s);
+      await assert.rejects(stat(join(workspace, 'unauthorized-review.txt')), { code: 'ENOENT' });
+
+      const emptyRootRequestIndex = modelRequests.length;
+      await writeFile(refreshFile, JSON.stringify({ refresh_token: 'r'.repeat(43) }), { mode: 0o400 });
+      const emptyRootReview = await run('named-review', 'delegation-only', '', {
+        ...reviewOptions, tool_selection: { tool_ids: [] },
+        subagents: [{
+          ...reviewer, prompt: reviewer.prompt + '. Write an artifact fixture.',
+          tool_selection: { tool_ids: ['write'] },
+        }],
+      }, { DIAGENT_TASK_MODEL_REFRESH_PATH: refreshFile });
+      assert.equal(emptyRootReview.code, 0, emptyRootReview.output);
+      assert.deepEqual(modelRequests[emptyRootRequestIndex].tools.map(tool => tool.function.name).sort(),
+        ['delegate_reviewer', 'wait_agent']);
+      assert.match(emptyRootReview.result, /reviewer-result:/);
+      assert.equal(await readFile(join(emptyRootReview.runDirectory, 'reviewer-report.md'), 'utf8'), 'reviewer artifact fixture');
+
+      const oldToolList = await run('named-review', 'legacy-tool-list', '', {
+        ...reviewOptions, subagents: [{
+          name: reviewer.name, description: reviewer.description, prompt: reviewer.prompt, tools: ['read'],
+        }],
+      }, { DIAGENT_TASK_MODEL_REFRESH_PATH: refreshFile });
+      assert.equal(oldToolList.code, 2, oldToolList.output);
+      assert.match(oldToolList.output, /task\.subagents\[0\]\.tools is a legacy tool list/);
+
+      const noToolsReview = await run('named-review', 'tool-free-review', '', {
+        ...reviewOptions, tool_selection: { tool_ids: [] },
+        subagents: [{ ...reviewer, tool_selection: { tool_ids: [] } }],
+      }, { DIAGENT_TASK_MODEL_REFRESH_PATH: '' });
+      assert.equal(noToolsReview.code, 0, noToolsReview.output);
+      assert.match(noToolsReview.result, /unknown tool "read"/);
+      await assert.rejects(stat(join(workspace, 'unauthorized-review.txt')), { code: 'ENOENT' });
+      modelRequests.length = 0;
+      mcpRequests.length = 0;
+    }
     const success = await run('/literal-smoke', 'success', 'mcp.json');
     assert.equal(success.code, 0, success.output);
     assert.equal(success.result, 'pilot-ok');
@@ -178,6 +367,80 @@ test('DSH task preserves the input, MCP and result contract with DiOS events dis
     assert.ok(modelRequests.some(request => request.messages.some(message =>
       message.role === 'tool' && message.content.includes('mcp-ok'))));
     assert.ok(mcpRequests.some(request => request.method === 'tools/call' && request.authorization === 'Bearer smoke-mcp'));
+
+    const skillRequestIndex = modelRequests.length;
+    const scopedSkills = await run('named-review', 'role-skills', '', {
+      tool_selection: { tool_ids: ['skill'] },
+      subagents: [{
+        name: 'reviewer', description: 'Review with a Skill',
+        prompt: 'Reviewer fixture persona. Use assigned Skill fixture.',
+        tool_selection: { tool_ids: ['skill'] }, skill_names: ['review-skill'],
+      }],
+    });
+    assert.equal(scopedSkills.code, 0, scopedSkills.output);
+    const skillRequests = modelRequests.slice(skillRequestIndex);
+    const childSkillRequest = skillRequests.find(request => request.messages.some(message =>
+      message.role === 'system' && message.content?.includes('Reviewer fixture persona')));
+    assert.match(JSON.stringify(skillRequests[0]), /DiAgent smoke skill marker/);
+    assert.doesNotMatch(JSON.stringify(skillRequests[0]), /Reviewer skill marker/);
+    assert.match(JSON.stringify(childSkillRequest), /Reviewer skill marker/);
+    assert.doesNotMatch(JSON.stringify(childSkillRequest), /DiAgent smoke skill marker/);
+    assert.match(scopedSkills.result, /Review Skill loaded/);
+    assert.doesNotMatch(scopedSkills.result, /Test instructions/);
+    const defaultRootRequestIndex = modelRequests.length;
+    const childOnlySkills = await run('named-review', 'child-only-skills', '', {
+      skill_names: [],
+      subagents: [{
+        name: 'reviewer', description: 'Review with a Skill',
+        prompt: 'Reviewer fixture persona. Use assigned Skill fixture.',
+        tool_selection: { tool_ids: ['skill'] }, skill_names: ['review-skill'],
+      }],
+    });
+    assert.equal(childOnlySkills.code, 0, childOnlySkills.output);
+    assert.doesNotMatch(JSON.stringify(modelRequests[defaultRootRequestIndex]), /Reviewer skill marker/);
+
+    const roles = ['alpha', 'beta'];
+    for (const name of roles) {
+      await writeFile(join(workspace, name + '-mcp.json'), JSON.stringify({
+        scope: { transport: 'streamable-http', url: baseURL + '/mcp-' + name },
+      }));
+    }
+    const mcpRequestIndex = modelRequests.length;
+    const scopedMcp = await run('named-mcp', 'role-mcp', 'mcp.json', {
+      tool_selection: { tool_ids: ['mcp'] }, tools: ['lookup'],
+      subagents: roles.map(name => ({
+        name, description: 'Consult ' + name, prompt: 'MCP child ' + name,
+        tool_selection: { tool_ids: ['mcp'] }, mcp_config_path: name + '-mcp.json',
+      })),
+    });
+    assert.equal(scopedMcp.code, 0, scopedMcp.output);
+    const roleRequests = modelRequests.slice(mcpRequestIndex);
+    const toolNames = request => request.tools.map(tool => tool.function.name).sort();
+    assert.deepEqual(toolNames(roleRequests[0]), ['delegate_alpha', 'delegate_beta', 'mcp__smoke__lookup', 'wait_agent']);
+    assert.match(JSON.stringify(roleRequests[0].messages), /MCP instructions for parent only/);
+    for (const name of roles) {
+      const requests = roleRequests.filter(request => request.messages.some(message =>
+        message.role === 'system' && message.content?.includes('MCP child ' + name)));
+      assert.ok(requests.length, name + ' must run');
+      assert.deepEqual(toolNames(requests[0]), [`mcp__scope__${name}`]);
+      assert.match(JSON.stringify(requests[0].messages), new RegExp(`MCP instructions for ${name} only`));
+      assert.doesNotMatch(JSON.stringify(requests[0].messages), /MCP instructions for parent only/);
+      assert.match(scopedMcp.result, new RegExp(`mcp-${name}-ok`));
+    }
+    const childCalls = mcpRequests.filter(request => request.role && request.method === 'tools/call');
+    assert.deepEqual(childCalls.map(({ role, name }) => [role, name]), [['alpha', 'alpha'], ['beta', 'beta']]);
+
+    const mcpRequestCount = mcpRequests.length;
+    for (const [label, toolIds] of [['text-only', []], ['skill-only', ['skill']]]) {
+      const requestIndex = modelRequests.length;
+      const selected = await run('selected-task-tools', label, 'does-not-exist.json', {
+        tool_selection: { tool_ids: toolIds },
+      });
+      assert.equal(selected.code, 0, selected.output);
+      assert.equal(selected.result, 'pilot-ok');
+      assert.deepEqual(modelRequests[requestIndex].tools?.map(tool => tool.function.name) ?? [], toolIds);
+    }
+    assert.equal(mcpRequests.length, mcpRequestCount);
 
     const failure = await run('fail-smoke', 'failure', '');
     assert.equal(failure.code, 1, failure.output);
@@ -207,6 +470,13 @@ test('DSH task preserves the input, MCP and result contract with DiOS events dis
     assert.equal(modelRequests[0].temperature, 0.7, 'Omitting temperature must preserve the legacy task default');
     assert.deepEqual(modelRequests.slice(requestCount).map(request => request.temperature), [0, 0],
       'Explicit zero temperature must be sent for the initial request and tool continuation');
+
+    const managedRequestIndex = modelRequests.length;
+    const explicitMcp = await run('selected-mcp', 'task-mcp-only', 'mcp.json', {
+      tool_selection: { tool_ids: ['mcp'] }, tools: ['lookup'],
+    });
+    assert.equal(explicitMcp.code, 0, explicitMcp.output);
+    assert.deepEqual(modelRequests[managedRequestIndex].tools.map(tool => tool.function.name), ['mcp__smoke__lookup']);
 
     const ambiguous = await run('selected-mcp', 'ambiguous', 'mcp.json', { tools: ['lookup_000000000000'] });
     assert.notEqual(ambiguous.code, 0);

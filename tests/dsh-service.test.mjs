@@ -1,11 +1,31 @@
 /** 验证 DiOS 用来探测常驻 DiAgent 的 HTTP 契约。 */
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdir, mkdtempDisposable, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtempDisposable, readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { writeChatProfile } from '../dist/dsh/profile.js';
 import { createServiceServer } from '../dist/service/server.js';
+
+test('the default Chat profile gives DSH an explicit empty tool and Skill selection', async () => {
+  await mkdir('.cache', { recursive: true });
+  await using home = await mkdtempDisposable(join(process.cwd(), '.cache', 'diagent-chat-profile-'));
+  const path = await writeChatProfile({
+    model: { name: 'fixture-model', baseURL: 'http://model.test/v1', apiKey: 'fixture' },
+    personaPrefix: 'Fixture assistant', temperature: 0.7,
+    skillsDir: join(home.path, 'skills'), skillNames: [], toolIds: [],
+    mcpPlugins: [], history: [], streamText: false,
+  }, home.path);
+  const rows = JSON.parse(await readFile(path, 'utf8'));
+  const skills = rows.find(row => row.id === 'skill-filesystem');
+  const entries = rows.flatMap(row => row.insert ?? []);
+  const selection = entries.find(row => row.id === 'diagent-tool-selection');
+  assert.deepEqual(skills.config, { includeDefaultRoots: false, customSkillDirs: [], watch: false });
+  assert.deepEqual(selection.config, { toolIds: [], mcpServerNames: [] });
+  assert.equal(rows.find(row => row.id === 'session-log-deepseek').disabled, true);
+  assert.deepEqual(entries.map(row => row.id), ['diagent-tool-selection', 'diagent-task-temperature']);
+});
 
 test('GET /health reports the service is alive', async () => {
   const server = createServiceServer();

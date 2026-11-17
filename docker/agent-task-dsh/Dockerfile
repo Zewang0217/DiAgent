@@ -24,4 +24,9 @@ ENTRYPOINT ["node", "dist/service/server.js"]
 # 默认构建仍生成一次性任务镜像，沿用既有构建入口。
 FROM runtime AS task
 
-ENTRYPOINT ["node", "dist/task/main.js"]
+RUN mkdir -p -m 0700 /run/diagent
+LABEL org.hqit.diagent.task-tool-selection="1"
+LABEL org.hqit.diagent.task-model-refresh="1"
+LABEL org.hqit.diagent.task-subagents="1"
+LABEL org.hqit.diagent.task-subagent-resources="1"
+ENTRYPOINT ["node", "--disable-sigusr1", "dist/task/main.js"]

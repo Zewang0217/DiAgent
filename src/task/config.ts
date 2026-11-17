@@ -4,6 +4,26 @@ import { basename, extname, isAbsolute, resolve } from 'node:path';
 import { parse } from 'yaml';
 
 type ConfigObject = Record<string, unknown>;
+/** DSH 文件工具使用本地工作区，并受任务的路径限制。 */
+export const taskFileTools = ['read', 'write', 'edit'];
+/** 只能在已隔离模型凭据的任务中显式启用的工作区工具。 */
+export const taskWorkspaceTools = ['shell', ...taskFileTools];
+
+/** 识别任务入口和容器使用的 Streamable HTTP 连接类型。 */
+export function isStreamableHttpTransport(value: unknown): boolean {
+  return value === 'streamable_http' || value === 'streamable-http' || value === 'http';
+}
+
+/** 任务内委托的角色定义。子 Agent 使用任务的模型路由。 */
+interface TaskSubagent {
+  name: string;
+  description: string;
+  prompt: string;
+  toolIds: string[];
+  skillNames: string[];
+  skillsDir?: string;
+  mcpConfigPath?: string;
+}
 
 /** 已校验的任务配置。路径按各字段的约定解析，事件工具开关由部署环境决定。 */
 export interface TaskConfig {
@@ -18,6 +38,8 @@ export interface TaskConfig {
   temperature: number;
   skillsDir: string;
   skillNames: string[];
+  toolIds?: string[];
+  subagents: TaskSubagent[];
   mcpToolNames: string[];
   mcpConfigPath?: string;
   isDiosEventPublishingEnabled: boolean;
@@ -92,6 +114,59 @@ function stringList(value: unknown, field: string): string[] {
   return value;
 }
 
+function parseSubagents(value: unknown, modelKey: string, modelName: string, env: NodeJS.ProcessEnv): TaskSubagent[] {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw new TaskConfigError('task.subagents must be a list of objects');
+  const names = new Set<string>();
+  return value.map((item, index) => {
+    const field = `task.subagents[${index}]`;
+    const role = object(item, field);
+    const name = requiredText(role.name, field + '.name').trim();
+    if (!/^[a-z][a-z0-9_-]{0,47}$/.test(name) || names.has(name)) {
+      throw new TaskConfigError(field + '.name must be a unique tool-safe identifier');
+    }
+    names.add(name);
+    const model = text(role.model, field + '.model');
+    if (model && model !== modelKey && model !== modelName) {
+      throw new TaskConfigError(field + '.model must use the task model');
+    }
+    if (role.task) {
+      throw new TaskConfigError(field + ' cannot yet override the delegated task prompt');
+    }
+    if (role.tools != null) {
+      throw new TaskConfigError(field + '.tools is a legacy tool list; use tool_selection.tool_ids for DSH file tools');
+    }
+    const selection = object(role.tool_selection, field + '.tool_selection');
+    if (!Array.isArray(selection.tool_ids) || selection.tool_config != null) {
+      throw new TaskConfigError(field + '.tool_selection requires tool_ids and does not accept tool_config');
+    }
+    const toolIds = [...new Set(stringList(selection.tool_ids, field + '.tool_selection.tool_ids'))];
+    if (toolIds.some(id => !['skill', 'mcp', ...taskFileTools].includes(id))) {
+      throw new TaskConfigError(field + '.tool_selection can only select skill, mcp, read, write, or edit');
+    }
+    if (toolIds.some(id => taskFileTools.includes(id)) && !env.DIAGENT_TASK_MODEL_REFRESH_PATH) {
+      throw new TaskConfigError('Subagent file tools require the managed task model bridge');
+    }
+    const skillNames = [...new Set(stringList(role.skill_names, field + '.skill_names'))];
+    const skillsDir = text(role.skills_dir, field + '.skills_dir') || undefined;
+    if (skillNames.some(name => name.length > 64 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name))) {
+      throw new TaskConfigError(field + '.skill_names must contain valid Skill names');
+    }
+    if (toolIds.includes('skill') !== (skillNames.length > 0) || (skillsDir && !skillNames.length)) {
+      throw new TaskConfigError(field + '.skill requires tool selection and an explicit Skill list');
+    }
+    const mcpConfigPath = text(role.mcp_config_path, field + '.mcp_config_path') || undefined;
+    if (toolIds.includes('mcp') !== Boolean(mcpConfigPath)) {
+      throw new TaskConfigError(field + '.mcp requires tool selection and an explicit connection config');
+    }
+    return {
+      name, toolIds, skillNames, skillsDir, mcpConfigPath,
+      description: requiredText(role.description, field + '.description'),
+      prompt: requiredText(role.prompt ?? role.system_prompt, field + '.prompt'),
+    };
+  });
+}
+
 function fileName(value: unknown, field: string, fallback: string): string {
   const name = requiredText(value ?? fallback, field);
   if (isAbsolute(name) || basename(name) !== name || name === '.' || name === '..') {
@@ -128,9 +203,6 @@ export async function loadTaskConfig(env: NodeJS.ProcessEnv): Promise<TaskConfig
   if (diosEvents !== 'true' && diosEvents !== 'false') {
     throw new TaskConfigError('DIAGENT_ENABLE_DIOS_EVENTS must be true or false');
   }
-  if (task.subagents != null && (!Array.isArray(task.subagents) || task.subagents.length > 0)) {
-    throw new TaskConfigError('Configured subagents are not supported by the DSH task runner yet');
-  }
   if (task.thread_id || task.middleware_config != null) {
     throw new TaskConfigError('Task checkpoints and middleware_config require the Python runner');
   }
@@ -153,6 +225,7 @@ export async function loadTaskConfig(env: NodeJS.ProcessEnv): Promise<TaskConfig
   const model = parseModelConfig(
     models.models, modelKey, app.LLM_OPENAI_API_KEY || env.LLM_OPENAI_API_KEY || env.OPENAI_API_KEY,
   );
+  const subagents = parseSubagents(task.subagents, modelKey, model.name, env);
 
   const skillsDir = resolve(workspace, text(task.skills_dir, 'task.skills_dir', 'skills'));
   const skillNames = [...new Set(stringList(task.skill_names, 'task.skill_names'))];
@@ -161,12 +234,40 @@ export async function loadTaskConfig(env: NodeJS.ProcessEnv): Promise<TaskConfig
   }
 
   const selectedTools = stringList(task.tools, 'task.tools');
+  let toolIds: string[] | undefined;
+  if (Object.hasOwn(task, 'tool_selection')) {
+    const selection = object(task.tool_selection, 'task.tool_selection');
+    if (!Array.isArray(selection.tool_ids) || selection.tool_config != null) {
+      throw new TaskConfigError('task.tool_selection requires tool_ids and does not accept tool_config');
+    }
+    toolIds = [...new Set(stringList(selection.tool_ids, 'task.tool_selection.tool_ids'))];
+    if (toolIds.some(id => !['skill', 'mcp', 'publish_event', ...taskWorkspaceTools].includes(id))) {
+      throw new TaskConfigError('task.tool_selection contains an unsupported tool');
+    }
+    if (toolIds.some(id => taskWorkspaceTools.includes(id)) && !env.DIAGENT_TASK_MODEL_REFRESH_PATH) {
+      throw new TaskConfigError('Shell and file tools require the managed task model bridge');
+    }
+    if (toolIds.includes('skill') && skillNames.length === 0) {
+      throw new TaskConfigError('task.tool_selection skill requires task.skill_names');
+    }
+    if (toolIds.includes('publish_event') && diosEvents === 'false') {
+      throw new TaskConfigError('task.tool_selection publish_event is disabled by deployment');
+    }
+  }
   const taskMcpPath = text(task.mcp_config_path, 'task.mcp_config_path');
   const defaultMcpPath = text(app.MCP_CONFIG_PATH ?? env.MCP_CONFIG_PATH, 'MCP_CONFIG_PATH');
   // 显式空工具列表或空 MCP 路径表示关闭 MCP。省略时才允许使用部署默认路径。
-  const mcpConfigPath = (Array.isArray(task.tools) && selectedTools.length === 0) || task.mcp_config_path === '' ? undefined
+  const mcpConfigPath = (toolIds !== undefined && !toolIds.includes('mcp'))
+    || (Array.isArray(task.tools) && selectedTools.length === 0) || task.mcp_config_path === '' ? undefined
     : taskMcpPath ? resolve(workspace, taskMcpPath)
     : defaultMcpPath ? resolve(defaultMcpPath) : undefined;
+  if (toolIds?.includes('mcp') && !mcpConfigPath) {
+    throw new TaskConfigError('task.tool_selection mcp requires an enabled MCP configuration');
+  }
+
+  if (subagents.some(role => role.mcpConfigPath) && (toolIds === undefined || toolIds.includes('shell'))) {
+    throw new TaskConfigError('Subagent MCP requires an explicit parent tool_selection without shell');
+  }
 
   const temperature = task.temperature;
   if (temperature != null && (typeof temperature !== 'number'
@@ -196,9 +297,11 @@ export async function loadTaskConfig(env: NodeJS.ProcessEnv): Promise<TaskConfig
     temperature: temperature ?? 0.7,
     skillsDir,
     skillNames,
+    toolIds,
+    subagents,
     mcpToolNames: selectedTools,
     mcpConfigPath,
-    isDiosEventPublishingEnabled: diosEvents === 'true',
+    isDiosEventPublishingEnabled: diosEvents === 'true' && (toolIds === undefined || toolIds.includes('publish_event')),
     model,
   };
 }
