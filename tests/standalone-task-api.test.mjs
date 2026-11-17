@@ -113,6 +113,36 @@ test('an interrupted launch left in created is reported as failed and cleaned up
   });
 }));
 
+test('the controller resolves child MCP assets under the deployed profile and rejects credentials', () => fixture(async options => {
+  const profile = join(options.profiles, 'reviewer');
+  const configPath = join(profile, 'agent-task.json');
+  const config = JSON.parse(await readFile(configPath, 'utf8'));
+  config.task.tool_selection = { tool_ids: [] };
+  config.task.subagents = [{
+    name: 'reviser', description: 'Revise', prompt: 'Revise.', tool_selection: { tool_ids: ['mcp'] },
+    mcp_config_path: 'child-mcp.json',
+  }];
+  await writeFile(configPath, JSON.stringify(config));
+  let started;
+  const docker = { async start(task) { started = task; } };
+  await callApi(options, docker, async request => {
+    const submit = () => request('/v1/tasks', { method: 'POST', body: JSON.stringify({ profile: 'reviewer', prompt: 'Run' }) });
+    const path = join(profile, 'child-mcp.json');
+    await writeFile(path, JSON.stringify({ fixture: { url: 'http://gateway/mcp', headers: { Authorization: 'fixture' } } }));
+    assert.equal((await submit()).status, 500);
+    assert.equal(started, undefined);
+    await writeFile(path, JSON.stringify({ fixture: { url: 'http://gateway/mcp' } }));
+    assert.equal((await submit()).status, 500);
+    await writeFile(path, JSON.stringify({
+      fixture: { transport: 'streamable-http', url: 'http://gateway/mcp' },
+    }));
+    const response = await submit();
+    assert.equal(response.status, 202, await response.clone().text());
+    const worker = JSON.parse(await readFile(started.config, 'utf8'));
+    assert.equal(worker.task.subagents[0].mcp_config_path, '/profile/child-mcp.json');
+  });
+}));
+
 test('authentication and validation reject requests before creating a container', () => fixture(async options => {
   const docker = {
     async start() { assert.fail('Invalid submission started a worker'); },
