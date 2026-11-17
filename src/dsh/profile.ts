@@ -31,6 +31,7 @@ interface ChatProfileConfig {
   skillNames: string[];
   toolIds: string[];
   mcpPlugins: ReturnType<typeof mcpProfileRows>;
+  mcpToolIds?: string[];
   history: ChatHistoryMessage[];
   streamText: boolean;
 }
@@ -253,14 +254,15 @@ export async function writeTaskProfile(config: TaskConfig, home: string, runDire
 
 /** 用已校验的模型路由、工具选择与会话历史生成一轮 Chat 的私有 DSH 补丁。 */
 export async function writeChatProfile(config: ChatProfileConfig, home: string): Promise<string> {
-  const { model, personaPrefix, temperature, toolIds, mcpPlugins, history, streamText } = config;
+  const { model, personaPrefix, temperature, toolIds, mcpPlugins, mcpToolIds, history, streamText } = config;
   const skillRoots = await selectedSkillRoots(config.skillsDir, config.skillNames, home);
   const hasShell = toolIds.includes('shell');
   const plugins = [
     ...mcpPlugins,
     ...(hasShell ? [localPlugin('legacy-shell', { bashDelegationOnly: true })] : []),
     ...(toolIds.includes('publish_event') ? [localPlugin('publish-event')] : []),
-    localPlugin('tool-selection', { toolIds, mcpServerNames: mcpPlugins.map(plugin => plugin.config.serverName) }),
+    localPlugin('tool-selection', { toolIds: mcpToolIds ? [...toolIds, ...mcpToolIds] : toolIds,
+      mcpServerNames: mcpToolIds ? [] : mcpPlugins.map(plugin => plugin.config.serverName) }),
     ...(history.length > 0 ? [localPlugin('chat-history', { history, personaPrefix })] : []),
     ...(streamText ? [localPlugin('chat-stream')] : []),
     localPlugin('task-temperature', { temperature }),

@@ -126,8 +126,111 @@ async function withChatFixture(run, {
     headers: { 'Content-Type': 'application/json', ...(modelGrant ? { 'X-DiAgent-Model-Grant': modelGrant } : {}) },
     body: JSON.stringify({ model: 'fixture-model', stream, messages, tool_selection: toolSelection }), signal,
   });
-  await run(send, received);
+  await run(send, received, 'http://127.0.0.1:' + service.address().port);
 }
+
+test('legacy CloudEvent returns the model response synchronously', { timeout: 45_000 }, () => withChatFixture(async (_send, received, base) => {
+  const event = { id: 'event-1', type: 'notes.ready', source: 'fixture/notes', subject: 'draft', data: { label: 'sample' } };
+  const response = await fetch(base + '/v1/events', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(event) });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { status: 'processed', event_id: 'event-1', response: 'A2A reply' });
+  const prompt = received[0].messages.find(message => message.content?.includes('[事件通知]'))?.content;
+  assert.match(prompt, /notes\.ready.*fixture\/notes.*draft.*sample/s);
+}));
+
+test('legacy session ID saves a streaming turn, restores history, and can be deleted', { timeout: 45_000 }, () => withChatFixture(async (_send, received, base) => {
+  const sessionId = 'notes/episode';
+  const sessionUrl = base + '/v1/sessions/' + encodeURIComponent(sessionId);
+  const chat = (content, stream) => fetch(base + '/v1/chat/completions', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, stream, messages: [{ role: 'user', content }] }),
+  });
+
+  const first = await chat('Remember draft alpha', true);
+  assert.equal(first.status, 200);
+  assert.match(await first.text(), /\[DONE\]/);
+  const second = await chat('What was the draft?', false);
+  assert.equal(second.status, 200);
+  await second.json();
+  assert.ok(received[1].messages.some(message => message.role === 'user' && message.content === 'Remember draft alpha'));
+  const listing = await (await fetch(base + '/v1/sessions')).json();
+  assert.deepEqual(listing.sessions.map(({ session_id, message_count }) => ({ session_id, message_count })), [
+    { session_id: sessionId, message_count: 4 },
+  ]);
+  assert.deepEqual(await (await fetch(sessionUrl)).json(), { session_id: sessionId, messages: [
+    { role: 'user', content: 'Remember draft alpha' }, { role: 'assistant', content: 'A2A reply' },
+    { role: 'user', content: 'What was the draft?' }, { role: 'assistant', content: 'A2A reply' },
+  ] });
+  assert.deepEqual(await (await fetch(sessionUrl, { method: 'DELETE' })).json(), { status: 'deleted', session_id: sessionId });
+  assert.equal((await fetch(sessionUrl)).status, 404);
+}));
+
+test('legacy MCP directory returns tools from deployment configuration', { timeout: 45_000 }, async () => {
+  const schema = { type: 'object', properties: { query: { type: 'string' } } };
+  await using upstream = createServer(async (request, response) => {
+    if (request.method !== 'POST') return response.writeHead(405).end();
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const call = JSON.parse(Buffer.concat(chunks));
+    if (call.id === undefined) return response.writeHead(202).end();
+    assert.equal(request.headers.authorization, 'Bearer fixture-mcp');
+    const result = call.method === 'initialize' ? { protocolVersion: call.params.protocolVersion,
+      capabilities: { tools: {} }, serverInfo: { name: 'notes', version: '1' } }
+      : { tools: [
+        { name: 'lookup', description: 'Find notes', inputSchema: schema },
+        { name: 'unsafe.alias', inputSchema: schema },
+        { name: 'shell', inputSchema: schema },
+      ] };
+    response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ jsonrpc: '2.0', id: call.id, result }));
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+  await mkdir('.cache', { recursive: true });
+  await using workspace = await mkdtempDisposable(join(process.cwd(), '.cache', 'diagent-chat-mcp-'));
+  const configPath = join(workspace.path, 'servers.json');
+  await writeFile(configPath, JSON.stringify({ notes: { transport: 'streamable_http',
+    url: 'http://127.0.0.1:' + upstream.address().port, headers: { Authorization: 'Bearer fixture-mcp' } } }));
+  await withChatFixture(async (_send, received, base) => {
+    const response = await fetch(base + '/v1/tools');
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { tools: [
+      { id: 'lookup', name: 'lookup', description: 'Find notes', server: 'mcp', parameters: schema },
+    ], total: 1 });
+    const chat = await fetch(base + '/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'Find notes' }], tool_selection: { tool_ids: ['lookup'] } }) });
+    assert.equal(chat.status, 200, await chat.text());
+    assert.deepEqual(received[0].tools.map(tool => tool.function.name), ['mcp__notes__lookup']);
+    if (process.platform === 'linux') {
+      const shell = await _send([{ role: 'user', content: 'Read a file' }], false, undefined, { tool_ids: ['shell'] });
+      assert.equal(shell.status, 400);
+      assert.match(await shell.text(), /locally configured MCP connection credentials/);
+      assert.equal(received.length, 1);
+    }
+  }, { env: { MCP_CONFIG_PATH: configPath } });
+});
+
+test('legacy routes preserve per-turn authorization and DiOS-owned sessions', { timeout: 45_000 }, () => withChatFixture(async (_send, received, base) => {
+  const request = (path, body, grant) => fetch(base + path, {
+    ...(body ? { method: 'POST', body: JSON.stringify(body) } : {}),
+    headers: { 'Content-Type': 'application/json', ...(grant ? { 'X-DiAgent-Model-Grant': grant } : {}) },
+  });
+  assert.equal((await request('/v1/sessions')).status, 403);
+  assert.equal((await request('/v1/chat/completions', {
+    session_id: 'standalone', messages: [{ role: 'user', content: 'Remember this' }],
+  }, 'fixture-model-grant')).status, 403);
+  assert.equal((await request('/v1/tools?model=fixture-model')).status, 403);
+  assert.equal((await request('/v1/tools?model=fixture-model', undefined, 'invalid-grant')).status, 403);
+  const tools = await request('/v1/tools?model=fixture-model', undefined, 'fixture-model-grant');
+  assert.equal(tools.status, 403);
+  assert.match((await tools.json()).detail, /DiOS MCP catalog/);
+  const event = { id: 'event-1', source: 'fixture/notes', type: 'notes.ready' };
+  assert.equal((await request('/v1/events?model=fixture-model', event)).status, 400);
+  assert.equal(received.length, 0);
+  const processed = await request('/v1/events?model=fixture-model', event, 'fixture-model-grant');
+  assert.equal(processed.status, 200);
+  assert.equal((await processed.json()).response, 'A2A reply');
+}, { modelProxy: true }));
 
 test('non-streaming A2A service request returns the DSH reply', { timeout: 45_000 }, () => withChatFixture(async (send, received) => {
   const response = await send([{ role: 'user', content: 'Review the draft' }]);

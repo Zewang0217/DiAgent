@@ -8,6 +8,7 @@ import type { ChatHistoryMessage } from '../dsh/plugins/chat-history.js';
 import { runDshTurn } from '../dsh/task-runtime.js';
 import { parseModelConfig, TaskConfigError, type TaskConfig } from '../task/config.js';
 import { chatToolStream, type ChatStreamOutput } from './chat-tool-events.js';
+import { discoverLegacyTools, hasLocalMcpCredentials, standaloneMcpConnections } from './legacy-tools.js';
 
 /** 表示调用方输入不符合当前在线接口契约。 */
 export class ChatRequestError extends Error {
@@ -49,8 +50,8 @@ async function legacyCatalogContainsModelCredential(path: string): Promise<boole
   return containsModelCredential(record(record(parse(source)).models));
 }
 
-function parseToolSelection(value: unknown, env: NodeJS.ProcessEnv): string[] {
-  if (value == null) return [];
+function parseToolSelection(value: unknown, env: NodeJS.ProcessEnv): { toolIds: string[]; legacyNames: string[] } {
+  if (value == null) return { toolIds: [], legacyNames: [] };
   if (typeof value !== 'object' || Array.isArray(value)) {
     throw new ChatRequestError('tool_selection must be an object');
   }
@@ -58,10 +59,14 @@ function parseToolSelection(value: unknown, env: NodeJS.ProcessEnv): string[] {
   if (!Array.isArray(toolIds)) throw new ChatRequestError('tool_selection.tool_ids must be an array');
   if (toolConfig != null) throw new ChatRequestError('tool_selection.tool_config is not supported');
   const selected = new Set<string>();
+  const legacyNames = new Set<string>();
   for (const toolId of toolIds) {
     if (toolId !== 'shell' && toolId !== 'publish_event' && toolId !== 'skill'
       && !(toolId === 'mcp' && env.DIAGENT_MODEL_PROXY_URL)) {
-      throw new ChatRequestError('Unsupported Chat tool ID');
+      if (env.DIAGENT_MODEL_PROXY_URL || typeof toolId !== 'string' || toolId === 'mcp'
+        || !/^[A-Za-z0-9_-]{1,64}$/.test(toolId)) throw new ChatRequestError('Unsupported Chat tool ID');
+      legacyNames.add(toolId);
+      continue;
     }
     if (toolId === 'shell' && process.platform !== 'linux') throw new ChatRequestError('shell requires the Linux service image');
     if (toolId === 'publish_event' && env.DIAGENT_ENABLE_DIOS_EVENTS === 'false') {
@@ -72,7 +77,7 @@ function parseToolSelection(value: unknown, env: NodeJS.ProcessEnv): string[] {
     }
     selected.add(toolId);
   }
-  return [...selected];
+  return { toolIds: [...selected], legacyNames: [...legacyNames] };
 }
 
 function configuredSkillNames(env: NodeJS.ProcessEnv): string[] {
@@ -204,22 +209,32 @@ function managedMcpPlugins(proxyUrl: URL, claims: unknown): ReturnType<typeof mc
   return mcpProfileRows(servers);
 }
 
+async function selectStandaloneTools(names: string[], connections: ReturnType<typeof mcpProfileRows>, signal: AbortSignal) {
+  const available = await discoverLegacyTools(connections, signal);
+  const selected = names.map(name => {
+    const match = available.find(({ tool }) => tool.id === name);
+    if (!match) throw new ChatRequestError('Unsupported Chat tool ID: ' + name + ' is unknown or ambiguous');
+    return match;
+  });
+  return { mcpToolIds: selected.map(tool => tool.publicId), mcpPlugins: [...new Set(selected.map(tool => tool.connection))] };
+}
+
 /** 使用本次请求提供的历史执行一轮问答，并返回 DiOS 可读取的 completion。 */
 export async function completeChat(
   input: unknown, env: NodeJS.ProcessEnv, signal: AbortSignal,
   grant: ChatModelGrant,
   onStream?: (identity: ChatCompletionIdentity, output: ChatStreamOutput) => Promise<void>,
-): Promise<ChatCompletionIdentity & {object: string; choices: object[]}> {
+) {
   const request = record(input);
   if (request.stream !== undefined && typeof request.stream !== 'boolean') {
     throw new ChatRequestError('stream must be a boolean');
   }
   const { system, history, prompt } = parseMessages(request.messages);
-  const toolIds = parseToolSelection(request.tool_selection, env);
+  const { toolIds, legacyNames } = parseToolSelection(request.tool_selection, env);
   const hasShell = toolIds.includes('shell');
   const hasEventTool = toolIds.includes('publish_event');
   const skillNames = toolIds.includes('skill') ? configuredSkillNames(env) : [];
-  for (const field of ['session_id', 'tools', 'custom_fields', 'max_tokens', 'top_p', 'stop']) {
+  for (const field of ['tools', 'custom_fields', 'max_tokens', 'top_p', 'stop']) {
     if (request[field] != null) throw new ChatRequestError(field + ' is not supported by this Chat entry yet');
   }
   if (request.model != null && typeof request.model !== 'string') {
@@ -232,7 +247,13 @@ export async function completeChat(
   const workspace = resolve(env.AGENT_WORKSPACE || 'workspace');
   const requestedModel = typeof request.model === 'string' ? request.model : undefined;
   const { model, mcpPlugins: grantedMcpPlugins } = await resolveChatModel(requestedModel, env, workspace, hasShell, grant, signal);
-  const mcpPlugins = toolIds.includes('mcp') ? grantedMcpPlugins : [];
+  const standaloneConnections = !env.DIAGENT_MODEL_PROXY_URL && (hasShell || legacyNames.length)
+    ? await standaloneMcpConnections(env, signal) : [];
+  if (hasShell && hasLocalMcpCredentials(standaloneConnections)) {
+    throw new ChatRequestError('shell is unavailable with locally configured MCP connection credentials');
+  }
+  const { mcpPlugins, mcpToolIds } = legacyNames.length ? await selectStandaloneTools(legacyNames, standaloneConnections, signal)
+    : { mcpPlugins: toolIds.includes('mcp') ? grantedMcpPlugins : [], mcpToolIds: undefined };
   const builtInTools = toolIds.filter(id => id !== 'mcp');
 
   const identity = { id: 'chatcmpl-' + randomUUID(), created: Math.floor(Date.now() / 1000), model: model.name };
@@ -242,7 +263,7 @@ export async function completeChat(
   const personaPrefix = system.length > 0 ? system.join('\n') : env.AGENT_SYSTEM_PROMPT || '你是用户的助理。';
   let streamedText = '';
   const writeProfile = (home: string) => writeChatProfile({
-    model, personaPrefix, temperature, skillNames, mcpPlugins, history,
+    model, personaPrefix, temperature, skillNames, mcpPlugins, mcpToolIds, history,
     skillsDir: resolve(workspace, env.SKILLS_DIR || 'skills'),
     toolIds: builtInTools, streamText: Boolean(sendDelta),
   }, home);
@@ -267,6 +288,6 @@ export async function completeChat(
   }
   return {
     ...identity, object: 'chat.completion',
-    choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
+    choices: [{ index: 0, message: { role: 'assistant' as const, content }, finish_reason: 'stop' }],
   };
 }

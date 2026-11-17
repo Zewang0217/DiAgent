@@ -20,7 +20,20 @@ DiOS 启用受管模型时，容器配置改用 `DIAGENT_MODEL_PROXY_URL` 和 `D
 
 DiOS 在受管 Chat 和常驻 A2A 中按 Agent 分配将 `mcp` 放入 `tool_selection.tool_ids`。DiAgent 校验轮次授权后，通过 DiOS 网关装配获准的 Streamable HTTP MCP。网关筛选工具发现与调用，供应商凭据留在 DiOS。Tool selection 为空时保持纯问答。常驻网关按轮次绑定上游会话，到期或结束后撤销授权，并尝试关闭已绑定的上游会话。常驻网关不开放独立的 MCP GET SSE。
 
-带工具的 SSE 使用 `event: tool_call` 发送工具开始、结束或失败。如果 DiOS 把已发布事件置为待审批，发送 `event: event_approval` 及 `event_id`。启用工具时，模型每步结束后发送该步文本，附带工具调用的步将文本置于 `delta.reasoning_content`。纯问答仍逐段发送。独立服务端历史仍待确认调用方需求。
+带工具的 SSE 使用 `event: tool_call` 发送工具开始、结束或失败。如果 DiOS 把已发布事件置为待审批，发送 `event: event_approval` 及 `event_id`。启用工具时，模型每步结束后发送该步文本，附带工具调用的步将文本置于 `delta.reasoning_content`。纯问答仍逐段发送。
+
+### 旧常驻接口
+
+独立常驻服务在同一信任域内兼容以下调用，底层由同一个 DSH 执行器完成推理。
+
+| 旧接口 | TypeScript 服务的行为 |
+| --- | --- |
+| `POST /v1/events` | 接收 CloudEvent，等待单轮执行结束，返回 `status: "processed"`、`event_id` 和 `response`。独立服务使用部署模型，受管容器需要 `X-DiAgent-Model-Grant` 和对应的 `?model=`（或部署模型默认值）。DiOS 的业务事件入口仍负责路由和任务状态。 |
+| `GET /v1/tools` | 读取部署的 Streamable HTTP MCP 配置 `MCP_CONFIG_PATH`，默认 `configs/mcp_servers.json`。返回 `{tools,total}`，原始工具名可填入 Chat 的 `tool_selection.tool_ids`。目录省略和内置名冲突、跨服务同名或无法无损映射为 DSH 名称的工具。 |
+| `POST /v1/chat/completions` 的 `session_id` | 同一独立服务进程内拼接历史，流式或非流式成功完成后保存本轮。省略 ID 时由调用方管理历史。 |
+| `GET /v1/sessions`、`GET/DELETE /v1/sessions/{id}` | 列出、读取或删除进程内的旧会话。会话重启后清空，默认闲置 24 小时过期，每会话最多保存 50 条消息，沿用 `SESSION_TTL` 和 `MAX_HISTORY_MESSAGES`。 |
+
+在受管容器中，使用 DiOS 的 Chat 会话 API 和 Registry MCP 工具目录。目录读取独立于运行时轮次授权，避免提前占用同一轮 MCP 会话。独立服务的旧会话和 MCP 工具目录沿用可信调用方边界。若部署 MCP 文件含连接 headers、URL 用户信息或查询参数，独立服务拒绝启用 Shell。旧 stdio/SSE MCP 配置需要迁移为 Streamable HTTP。
 
 本机可用 `docker compose build agent-service` 构建常驻镜像。DiOS 开发配置通过 `DIOS_DIAGENT_SERVICE_IMAGE` 选择 `dios-diagent-service:dsh-dev`，并挂载工作区和模型配置。
 

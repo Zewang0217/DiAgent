@@ -15,6 +15,7 @@ v0.1 的交付目标是用 TypeScript + DSH 完整替代现有 DiAgent。一次�
 
 ## 当前 ticket
 
+- [x] 常驻 DSH 服务接回独立部署的旧工具目录、同步 CloudEvent、`session_id` 与会话管理。Linux Docker 常驻回归 27 项通过、1 项按平台跳过。代码和设计评审确认目录与旧工具选择共用发现规则，受管模式通过 DiOS 查询工具与管理会话，事件仍校验模型授权。
 - [x] 本地 v0.1 统一验收。当前两个工作区构建 DSH task/service 和 DiOS 前端。DiAgent Linux 回归 38 项通过（1 项非 Linux 专用跳过），DiOS 后端 63 项通过。Reviewer 旧 Python、DSH、回滚三轮任务为 `65bcd0172b81`、`1344d8bb6f06`、`cddcfdc5bea9`。中间一轮运行中重启 DiOS，恢复后仍登记产物和完成事件。Chromium 在事件日志看到 `dispatched`，活动总览显示三个任务均已完成。
 - [x] 统一验收覆盖常驻 A2A 镜像切换与回滚、旧 DiOS 会话续聊、受管 Chat 的 Shell、Skills、MCP、事件审批，以及独立 API 的进程重启和结果回收。常驻回滚使用兼容模式和模拟模型。另用一条合成提示验证真实 `ecnu-max` 经 DiOS 代理完成 SSE，常驻容器无供应商密钥和模型目录文件。
 - [ ] 目标环境验收。在发布候选镜像 digest 后，用目标的 MCP、业务凭据和存量配置完成切换与回滚。具名 `subagents`、执行器内 `cron/interval` 和旧 checkpoint 配置仍需按存量调用核实迁移方式。
@@ -63,7 +64,7 @@ v0.1 的交付目标是用 TypeScript + DSH 完整替代现有 DiAgent。一次�
 - [x] 受管 Chat 和常驻 A2A 装配按 Agent 分配的 Skills。隔离 Docker 联调验证文件型 Skill 的附属文件、控制台录入的 Skill 清单与未分配目录排除。目录只读挂载，随 Agent 重建更新分配。DSH 复用一次性任务的 Skill 发现逻辑。
 - [x] 受管 Chat 和常驻 A2A 装配按 Agent 授权的 Streamable HTTP MCP。隔离 Docker 中模型只看到并调用获准 `lookup`，容器没有 `mcp_servers.json` 或上游 MCP 凭据。接口回归验证空工具名单、工具发现和调用过滤、上游会话 ID 绑定及轮次撤销。已绑定会话在轮次结束时有界关闭。
 - [x] 盘点本机 DiOS、旧 DiAgent、DiAgent-TS 和同工作区业务代码中的旧会话调用。只找到 DiOS 的 Chat/A2A 入口使用 DiAgent Chat 接口，未发现直连旧 `/v1/sessions` 或依赖 DiAgent 自存 `session_id` 的业务代码。已补旧式 DiOS 数据记录续聊的接口回归。
-- [ ] 在目标环境确认是否有仓库外客户端直连旧 `session_id`，并用一个已有 DiOS Chat 会话复验续聊。若仍有直连客户端，再确定是否保留旧会话契约和如何处理进程内历史。
+- [ ] 在目标环境盘点仓库外的旧会话调用方。分别使用已有 DiOS Chat 会话和实际直连客户端复验续聊，核对服务切换时独立进程内历史的处理。
 - [ ] 核实仍在使用的独立入口和配置。完成兼容验收后，将目标环境的 task 和 service 切换到 DSH，并演练按部署恢复旧镜像。
 
 ## 后续方向
