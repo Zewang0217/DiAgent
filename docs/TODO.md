@@ -15,6 +15,7 @@ v0.1 的交付目标是用 TypeScript + DSH 完整替代现有 DiAgent。一次�
 
 ## 当前 ticket
 
+- [x] 常驻 Chat 接收 DiOS 下发的推理预算。DSH 在生成请求前拦截超额步骤，工具轮次复用已有插件。隔离 Docker 验证 SSE 阻塞时一步预算只发出一次生成请求。常驻回归 30 项通过、1 项按平台跳过，任务和独立 API 17 项通过。代码与设计评审已核对两种入口和预算边界。
 - [x] 常驻 DSH 服务接回独立部署的旧工具目录、同步 CloudEvent、`session_id` 与会话管理。Linux Docker 常驻回归 27 项通过、1 项按平台跳过。代码和设计评审确认目录与旧工具选择共用发现规则，受管模式通过 DiOS 查询工具与管理会话，事件仍校验模型授权。
 - [x] 本地 v0.1 统一验收。当前两个工作区构建 DSH task/service 和 DiOS 前端。DiAgent Linux 回归 38 项通过（1 项非 Linux 专用跳过），DiOS 后端 63 项通过。Reviewer 旧 Python、DSH、回滚三轮任务为 `65bcd0172b81`、`1344d8bb6f06`、`cddcfdc5bea9`。中间一轮运行中重启 DiOS，恢复后仍登记产物和完成事件。Chromium 在事件日志看到 `dispatched`，活动总览显示三个任务均已完成。
 - [x] 统一验收覆盖常驻 A2A 镜像切换与回滚、旧 DiOS 会话续聊、受管 Chat 的 Shell、Skills、MCP、事件审批，以及独立 API 的进程重启和结果回收。常驻回滚使用兼容模式和模拟模型。另用一条合成提示验证真实 `ecnu-max` 经 DiOS 代理完成 SSE，常驻容器无供应商密钥和模型目录文件。

@@ -35,6 +35,30 @@ function record(value: unknown): Record<string, unknown> {
     ? value as Record<string, unknown> : {};
 }
 
+function parseReasoning(value: unknown): { stepLimit: number; maxToolRounds?: number } {
+  if (value == null) return { stepLimit: 100 };
+  if (typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => key !== 'reasoning')) {
+    throw new ChatRequestError('custom_fields only supports reasoning');
+  }
+  const reasoning = record(value).reasoning;
+  if (reasoning == null) return { stepLimit: 100 };
+  if (typeof reasoning !== 'object' || Array.isArray(reasoning)) {
+    throw new ChatRequestError('custom_fields.reasoning must be an object');
+  }
+  const { recursion_limit: stepLimit = 100, max_tool_rounds: maxToolRounds } = record(reasoning);
+  return {
+    stepLimit: reasoningBudget(stepLimit ?? 100, 'recursion_limit'),
+    maxToolRounds: maxToolRounds == null ? undefined : reasoningBudget(maxToolRounds, 'max_tool_rounds'),
+  };
+}
+
+function reasoningBudget(value: unknown, field: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+    throw new ChatRequestError('custom_fields.reasoning.' + field + ' must be a positive integer');
+  }
+  return value;
+}
+
 function containsModelCredential(models: Record<string, unknown>): boolean {
   return Object.values(models).some(entry => Boolean(record(entry).api_key));
 }
@@ -234,9 +258,10 @@ export async function completeChat(
   const hasShell = toolIds.includes('shell');
   const hasEventTool = toolIds.includes('publish_event');
   const skillNames = toolIds.includes('skill') ? configuredSkillNames(env) : [];
-  for (const field of ['tools', 'custom_fields', 'max_tokens', 'top_p', 'stop']) {
+  for (const field of ['tools', 'max_tokens', 'top_p', 'stop']) {
     if (request[field] != null) throw new ChatRequestError(field + ' is not supported by this Chat entry yet');
   }
+  const { stepLimit, maxToolRounds } = parseReasoning(request.custom_fields);
   if (request.model != null && typeof request.model !== 'string') {
     throw new ChatRequestError('model must be a string');
   }
@@ -265,9 +290,9 @@ export async function completeChat(
   const writeProfile = (home: string) => writeChatProfile({
     model, personaPrefix, temperature, skillNames, mcpPlugins, mcpToolIds, history,
     skillsDir: resolve(workspace, env.SKILLS_DIR || 'skills'),
-    toolIds: builtInTools, streamText: Boolean(sendDelta),
+    toolIds: builtInTools, streamText: Boolean(sendDelta), stepLimit, maxToolRounds,
   }, home);
-  const content = await runDshTurn({ workspace, prompt, model, stepLimit: 100 }, writeProfile, signal, () => {}, {
+  const content = await runDshTurn({ workspace, prompt, model, stepLimit }, writeProfile, signal, () => {}, {
     toolEnv: {
       DIOS_API: hasEventTool ? env.DIOS_API : '',
       DIAGENT_EVENT_ACCESS_TOKEN: hasEventTool ? env.DIAGENT_EVENT_ACCESS_TOKEN : '',

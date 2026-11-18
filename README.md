@@ -14,6 +14,8 @@ DiAgent 在 Docker 容器中运行智能体任务。本分支使用 TypeScript �
 
 多轮请求由调用方在 `messages` 中按顺序传入可选的开头系统消息、历史 `user` / `assistant` 文本和本轮 `user` 文本。DiOS 会从数据库组装历史。模型从 `LLM_MODELS_CONFIG_PATH` 指定的 YAML 加载，工作区由 `AGENT_WORKSPACE` 指定。请求可指定模型，也可使用部署配置的默认模型或唯一已配置模型。省略系统消息时使用 `AGENT_SYSTEM_PROMPT`。
 
+DiOS 配置的 `capabilities.reasoning` 会通过 `custom_fields.reasoning` 下发到 Chat。`recursion_limit` 默认 100，DSH 在发送生成请求前拦截超额 Chat 步骤，即使 SSE 客户端暂停读取也会生效。`max_tool_rounds` 限制发起工具调用的模型步骤，同一步中的多个调用共用一次额度。超额工具调用会在执行前被拒绝，该轮仍可完成回答。两个预算都接受 JavaScript 安全整数范围内的正整数。旧 `reasoning.middleware` 字段可随请求保留，DSH 按部署的 profile 选择插件。
+
 DiOS 启用受管模型时，容器配置改用 `DIAGENT_MODEL_PROXY_URL` 和 `DIAGENT_MODEL_PROXY_AGENT_ID`。调用方在每轮请求指定 `model`，通过 `X-DiAgent-Model-Grant` 传递短期凭据，可用 `X-DiAgent-Model-Context-Length` 传递模型上下文长度。DiAgent 先向代理的 `POST /grants/check` 核验模型和容器自身的 Agent ID，再调用 OpenAI 兼容的 `/chat/completions`。工作区无需模型目录，供应商密钥由调用方的调度服务保管。仍需从挂载中移除旧凭据文件。独立部署可继续使用本地模型目录。
 
 在线请求通过 `tool_selection.tool_ids` 选择 `shell`（Linux 镜像）、`publish_event` 和 `skill`。省略或传空列表时使用纯问答。`shell` 使用 DSH 的工作区写入策略。启用 `shell` 的请求在模型目录、工作区遗留的 `models.yaml`、`LLM_OPENAI_API_KEY` 或 `OPENAI_API_KEY` 内发现模型 API 凭据时会被拒绝。纯问答仍可使用这些部署凭据。`publish_event` 使用部署配置的 `DIOS_API` 和事件专用凭据，并遵循 `DIAGENT_ENABLE_DIOS_EVENTS`。启用 `skill` 时，DSH 从 `SKILLS_DIR` 发现 `DIAGENT_SKILL_NAMES` JSON 数组指定的 Skills。受管模式由 DiOS 注入这两项，并逐目录只读挂载。

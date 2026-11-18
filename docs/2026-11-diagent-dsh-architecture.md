@@ -24,7 +24,7 @@
 
 | 配置 | 加载的运行插件 | 入口职责与默认权限 |
 | --- | --- | --- |
-| 初始基础 | `llm-pi-ai` 接模型，`system-prompt` 注入角色，`diagent-task-temperature` 传递模型温度。Task 与 Chat 复用 `diagent-tool-selection` 将显式名单应用到 DSH。 | 完成纯文本运行，显式空名单使用只读策略，模型可见工具列表为空。 |
+| 初始基础 | `llm-pi-ai` 接模型，`system-prompt` 注入角色，`diagent-model-request` 传递模型温度并在生成请求前校验 Chat 步数。Task 与 Chat 复用 `diagent-tool-selection` 将显式名单应用到 DSH。 | 完成纯文本运行，显式空名单使用只读策略，模型可见工具列表为空。 |
 | 一次性任务默认 | 有工具轮次预算时追加 `diagent-tool-round-limit`。 | 入口准备工作区、产物目录，管理超时、日志和退出码。入口可以写日志和最终结果，Agent 写文件所需的工具与权限仍按本次授权配置。 |
 | 常驻对话默认 | 请求携带历史时追加 `diagent-chat-history`。纯文本 SSE 需要逐段输出时追加 `diagent-chat-stream`。 | HTTP 入口返回 JSON 或 SSE。带工具的运行通过事件映射输出工具进度。每轮单独解析模型、上下文和权限，容器可以复用。 |
 

@@ -5,7 +5,9 @@ import { mkdir, mkdtempDisposable, readFile, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { writeChatProfile } from '../dist/dsh/profile.js';
+import { completeChat } from '../dist/service/chat.js';
 import { createServiceServer } from '../dist/service/server.js';
 
 test('the default Chat profile gives DSH an explicit empty tool and Skill selection', async () => {
@@ -13,7 +15,7 @@ test('the default Chat profile gives DSH an explicit empty tool and Skill select
   await using home = await mkdtempDisposable(join(process.cwd(), '.cache', 'diagent-chat-profile-'));
   const path = await writeChatProfile({
     model: { name: 'fixture-model', baseURL: 'http://model.test/v1', apiKey: 'fixture' },
-    personaPrefix: 'Fixture assistant', temperature: 0.7,
+    personaPrefix: 'Fixture assistant', temperature: 0.7, stepLimit: 100,
     skillsDir: join(home.path, 'skills'), skillNames: [], toolIds: [],
     mcpPlugins: [], history: [], streamText: false,
   }, home.path);
@@ -24,7 +26,7 @@ test('the default Chat profile gives DSH an explicit empty tool and Skill select
   assert.deepEqual(skills.config, { includeDefaultRoots: false, customSkillDirs: [], watch: false });
   assert.deepEqual(selection.config, { toolIds: [], mcpServerNames: [] });
   assert.equal(rows.find(row => row.id === 'session-log-deepseek').disabled, true);
-  assert.deepEqual(entries.map(row => row.id), ['diagent-tool-selection', 'diagent-task-temperature']);
+  assert.deepEqual(entries.map(row => row.id), ['diagent-tool-selection', 'diagent-model-request']);
 });
 
 test('GET /health reports the service is alive', async () => {
@@ -79,10 +81,11 @@ async function withChatFixture(run, {
     const writeChunk = (delta, finish_reason) => response.write('data: ' + JSON.stringify({ ...base,
       choices: [{ index: 0, delta, finish_reason }],
     }) + '\n\n');
+    const completedTools = input.messages.filter(message => message.role === 'tool').length;
     if (fixtureTool && (!mcp || input.tools?.some(tool => tool.function.name === fixtureTool.name))
-      && !input.messages.some(message => message.role === 'tool')) {
+      && completedTools < (fixtureTool.rounds ?? 1)) {
       if (fixtureTool.preamble) writeChunk({ role: 'assistant', content: fixtureTool.preamble }, null);
-      writeChunk({ role: 'assistant', tool_calls: [{ index: 0, id: 'call-chat-tool', type: 'function',
+      writeChunk({ role: 'assistant', tool_calls: [{ index: 0, id: 'call-chat-tool-' + completedTools, type: 'function',
         function: { name: fixtureTool.name, arguments: JSON.stringify(fixtureTool.arguments) },
       }] }, null);
       writeChunk({}, 'tool_calls');
@@ -110,7 +113,7 @@ async function withChatFixture(run, {
     api_key: catalogCredential,
   } } }));
 
-  await using service = createServiceServer({
+  const serviceEnv = {
     AGENT_WORKSPACE: workspace.path,
     ...(modelProxy ? { DIAGENT_MODEL_PROXY_URL: 'http://127.0.0.1:' + model.address().port + modelProxyPath,
       DIAGENT_MODEL_PROXY_AGENT_ID: 'fixture-agent' }
@@ -118,7 +121,8 @@ async function withChatFixture(run, {
     AGENT_SYSTEM_PROMPT: 'Reviewer role',
     SKILLS_DIR: skillsRoot,
     ...env,
-  });
+  };
+  await using service = createServiceServer(serviceEnv);
   service.listen(0, '127.0.0.1');
   await once(service, 'listening');
   const send = (messages, stream = false, signal, toolSelection, modelGrant) => fetch('http://127.0.0.1:' + service.address().port + '/v1/chat/completions', {
@@ -126,7 +130,7 @@ async function withChatFixture(run, {
     headers: { 'Content-Type': 'application/json', ...(modelGrant ? { 'X-DiAgent-Model-Grant': modelGrant } : {}) },
     body: JSON.stringify({ model: 'fixture-model', stream, messages, tool_selection: toolSelection }), signal,
   });
-  await run(send, received, 'http://127.0.0.1:' + service.address().port);
+  await run(send, received, 'http://127.0.0.1:' + service.address().port, serviceEnv);
 }
 
 test('legacy CloudEvent returns the model response synchronously', { timeout: 45_000 }, () => withChatFixture(async (_send, received, base) => {
@@ -138,6 +142,19 @@ test('legacy CloudEvent returns the model response synchronously', { timeout: 45
   const prompt = received[0].messages.find(message => message.content?.includes('[事件通知]'))?.content;
   assert.match(prompt, /notes\.ready.*fixture\/notes.*draft.*sample/s);
 }));
+
+test('DiOS Chat accepts its configured reasoning budget', { timeout: 45_000 }, () => withChatFixture(async (_send, received, base) => {
+  const response = await fetch(base + '/v1/chat/completions', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-DiAgent-Model-Grant': 'fixture-model-grant' },
+    body: JSON.stringify({ model: 'fixture-model', messages: [{ role: 'user', content: 'Review draft' }],
+      custom_fields: { reasoning: { recursion_limit: 120, max_tool_rounds: 20, middleware: {} } } }),
+  });
+
+  const result = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(result));
+  assert.equal(result.choices[0].message.content, 'A2A reply');
+  assert.equal(received.length, 1);
+}, { modelProxy: true }));
 
 test('legacy session ID saves a streaming turn, restores history, and can be deleted', { timeout: 45_000 }, () => withChatFixture(async (_send, received, base) => {
   const sessionId = 'notes/episode';
@@ -268,6 +285,48 @@ test('non-streaming Chat rejects tool metadata on the current message', { timeou
 }));
 
 const linuxShellTest = { timeout: 45_000, skip: process.platform !== 'linux' };
+
+test('blocked Chat SSE output cannot start an over-budget model request', linuxShellTest, async () => {
+  const extraRequest = Promise.withResolvers();
+  await withChatFixture(async (_send, received, _base, serviceEnv) => {
+    let paused = false;
+    const completion = completeChat({
+      stream: true, model: 'fixture-model', messages: [{ role: 'user', content: 'Check the draft' }],
+      tool_selection: { tool_ids: ['shell'] }, custom_fields: { reasoning: { recursion_limit: 1 } },
+    }, serviceEnv, AbortSignal.timeout(30_000), { token: 'fixture-model-grant' }, async (_identity, output) => {
+      if (output.type !== 'reasoning') return;
+      paused = true;
+      await Promise.race([extraRequest.promise, delay(2000, undefined, { ref: false })]);
+    });
+
+    await assert.rejects(completion, /step limit|did not complete/);
+    assert.equal(paused, true);
+    assert.equal(received.length, 1);
+  }, {
+    modelProxy: true,
+    fixtureTool: { name: 'shell', arguments: { command: 'printf checked' }, preamble: 'Checking.' },
+    replyFor: () => { extraRequest.resolve(); return 'Done'; },
+  });
+});
+
+test('DiOS Chat enforces the configured reasoning step and tool budgets', linuxShellTest, () => withChatFixture(async (_send, received, base) => {
+  const chat = reasoning => fetch(base + '/v1/chat/completions', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-DiAgent-Model-Grant': 'fixture-model-grant' },
+    body: JSON.stringify({ model: 'fixture-model', messages: [{ role: 'user', content: 'Review draft' }],
+      tool_selection: { tool_ids: ['shell'] }, custom_fields: { reasoning } }),
+  });
+
+  const limited = await chat({ recursion_limit: 1 });
+  assert.equal(limited.status, 502, await limited.text());
+  assert.equal(received.length, 1);
+
+  const completed = await chat({ recursion_limit: 5, max_tool_rounds: 1 });
+  assert.equal(completed.status, 200, await completed.text());
+  const results = received.at(-1).messages.filter(message => message.role === 'tool');
+  assert.equal(results.length, 2);
+  assert.match(results[0].content, /reasoning-budget-output/);
+  assert.match(results[1].content, /max_tool_rounds/);
+}, { modelProxy: true, fixtureTool: { name: 'shell', arguments: { command: 'printf reasoning-budget-output' }, rounds: 2 } }));
 
 test('managed Chat exposes only MCP tools the DiOS gateway grants', { timeout: 45_000 }, async () => {
   const grantId = '1'.repeat(32);

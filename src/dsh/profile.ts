@@ -34,6 +34,8 @@ interface ChatProfileConfig {
   mcpToolIds?: string[];
   history: ChatHistoryMessage[];
   streamText: boolean;
+  stepLimit: number;
+  maxToolRounds?: number;
 }
 
 function localPlugin(name: string, config?: object): object {
@@ -202,7 +204,7 @@ export async function writeTaskProfile(config: TaskConfig, home: string, runDire
       || config.toolIds?.some(id => taskFileTools.includes(id))) {
     plugins.push(localPlugin('task-file-scope', { workspace: config.workspace }));
   }
-  plugins.push(localPlugin('task-temperature', { temperature: config.temperature }));
+  plugins.push(localPlugin('model-request', { temperature: config.temperature }));
   let selectedMcpTools: string[] | undefined;
   if (mcpPlugins.length > 0 && config.mcpToolNames.length > 0) {
     const serverNames = mcpPlugins.map(plugin => plugin.config.serverName);
@@ -254,7 +256,7 @@ export async function writeTaskProfile(config: TaskConfig, home: string, runDire
 
 /** 用已校验的模型路由、工具选择与会话历史生成一轮 Chat 的私有 DSH 补丁。 */
 export async function writeChatProfile(config: ChatProfileConfig, home: string): Promise<string> {
-  const { model, personaPrefix, temperature, toolIds, mcpPlugins, mcpToolIds, history, streamText } = config;
+  const { model, personaPrefix, temperature, toolIds, mcpPlugins, mcpToolIds, history, streamText, stepLimit, maxToolRounds } = config;
   const skillRoots = await selectedSkillRoots(config.skillsDir, config.skillNames, home);
   const hasShell = toolIds.includes('shell');
   const plugins = [
@@ -265,7 +267,8 @@ export async function writeChatProfile(config: ChatProfileConfig, home: string):
       mcpServerNames: mcpToolIds ? [] : mcpPlugins.map(plugin => plugin.config.serverName) }),
     ...(history.length > 0 ? [localPlugin('chat-history', { history, personaPrefix })] : []),
     ...(streamText ? [localPlugin('chat-stream')] : []),
-    localPlugin('task-temperature', { temperature }),
+    ...(maxToolRounds === undefined ? [] : [localPlugin('tool-round-limit', { maxToolRounds })]),
+    localPlugin('model-request', { temperature, stepLimit }),
   ];
   return writeProfile(home, 'chat', { model, personaPrefix, skillRoots, hasShell }, plugins);
 }
