@@ -37,7 +37,7 @@
 | 入口 | 配置装配与模型可见性 |
 | --- | --- |
 | 共用执行 | 每轮用临时 DSH home 启动 `sdk`，传入 DiAgent 补丁与 `diagent-model`，完成后关闭进程并清理 home。历史是否进入新一轮取决于请求携带的消息。 [执行入口](../../src/dsh/task-runtime.ts) |
-| 一次性 Task | 显式禁用日志上报、遥测、插件清单上报、插件管理工具、Web、Office、日程、人工询问、目标工具与工作区指令读取。Linux 启用旧 `shell` 适配。事件默认按兼容行为启用，部署可关闭。空 Skills 名单会使用配置的 Skills 目录。MCP 按服务器配置追加，旧 `task.tools: []` 的语义是关闭 MCP。 [Task profile](../../src/dsh/profile.ts) · [Task 配置](../../src/task/config.ts) |
+| 一次性 Task | 显式禁用日志上报、遥测、插件清单上报、插件管理工具、Web、日程、人工询问、目标工具与工作区指令读取。默认工具的单 Agent 任务可以加载内置 Office Skills 并激活 Office 工具。Linux 启用旧 `shell` 适配。事件默认按兼容行为启用，部署可关闭。空 Skills 名单会使用配置的 Skills 目录。MCP 按服务器配置追加，旧 `task.tools: []` 的语义是关闭 MCP。 [Task profile](../../src/dsh/profile.ts) · [Task 配置](../../src/task/config.ts) |
 | Chat 与常驻 A2A | 与 Task 共用 SDK 运行入口。Chat profile 显式禁用三项上报组件，按请求追加 Shell、事件与 MCP 插件，并根据提供的历史、SSE 请求加入相应适配。工具限制在 Agent 创建时应用，已挂载的 DSH 内部组件可以继续服务于授权工具。普通 Chat 的空工具列表经过回归验证。 [Chat 装配](../../src/service/chat.ts) · [工具限制](../../src/dsh/plugins/tool-selection.ts) · [Chat 回归](../../tests/dsh-service.test.mjs) |
 
 对真实 Linux `writeTaskProfile` 生成的补丁做合成验证，示例设为无 MCP、五轮工具预算、启用事件。DSH 的 `--dump-config` 从 115 得到 **119 条**，增加 `diagent-publish-event`、`diagent-legacy-shell`、`diagent-task-temperature` 与 `diagent-tool-round-limit`。11 条原有配置变成 `disabled: true`。该验证观察配置合成结果。 [Task profile](../../src/dsh/profile.ts)

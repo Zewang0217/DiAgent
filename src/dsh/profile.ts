@@ -10,8 +10,9 @@ const sharedDisabled = [
 ];
 const taskDisabled = [
   'tool-web', 'tool-plugin-manager', 'tool-schedule', 'tool-ask-user', 'tool-goal',
-  'tool-office', 'skill-office', 'agent-instructions',
+  'agent-instructions',
 ];
+const taskOffice = ['tool-office', 'skill-office'];
 const taskSubagentDisabled = ['tool-subagent', 'tool-subagent-fork', 'tool-agent-team'];
 
 interface ProfileSettings {
@@ -19,6 +20,7 @@ interface ProfileSettings {
   personaPrefix: string;
   skillRoots: readonly string[];
   hasShell: boolean;
+  hasOffice?: boolean;
   hasNamedSubagents?: boolean;
   hasSubagentMcp?: boolean;
 }
@@ -61,7 +63,8 @@ async function writeProfile(
     ] : []),
   ];
   const disabled = (entry === 'task'
-    ? [...sharedDisabled, ...taskDisabled, ...(settings.hasNamedSubagents ? taskSubagentDisabled : []),
+    ? [...sharedDisabled, ...taskDisabled, ...(settings.hasOffice ? [] : taskOffice),
+      ...(settings.hasNamedSubagents ? taskSubagentDisabled : []),
       ...(settings.hasSubagentMcp ? ['mcp-resources'] : [])]
     : sharedDisabled)
     .map(id => ({ id, disabled: true }));
@@ -248,6 +251,8 @@ export async function writeTaskProfile(config: TaskConfig, home: string, runDire
   }
   return writeProfile(home, 'task', {
     model: config.model, skillRoots: namedSubagents ? [] : skillRoots, hasShell, hasNamedSubagents: Boolean(namedSubagents),
+    // DSH 的 Office Skill 由全局 provider 注册。具名子 Agent 只读取按角色分配的 Skills。
+    hasOffice: config.toolIds === undefined && !namedSubagents,
     // 子角色只订阅 MCP 工具。资源读取工具会绕过全局名单并注册到该会话。
     hasSubagentMcp: config.subagents.some(role => role.toolIds.includes('mcp')),
     personaPrefix: namedSubagents?.personaPrefix ?? personaPrefix,

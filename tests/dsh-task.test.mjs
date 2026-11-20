@@ -7,8 +7,43 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
+import { writeTaskProfile } from '../dist/dsh/profile.js';
 
 const project = fileURLToPath(new URL('../', import.meta.url));
+
+async function officeProfileRows({ toolIds, subagents = [] } = {}) {
+  const cacheDir = join(project, '.cache');
+  await mkdir(cacheDir, { recursive: true });
+  await using home = await mkdtempDisposable(join(cacheDir, 'diagent-office-profile-'));
+  const profile = await writeTaskProfile({
+    model: { name: 'fixture-model', baseURL: 'http://model.test/v1', apiKey: 'fixture' },
+    workspace: home.path, systemPrompt: 'Fixture assistant', temperature: 0,
+    skillsDir: join(home.path, 'skills'), skillNames: [], mcpToolNames: [], subagents, toolIds,
+    isDiosEventPublishingEnabled: false,
+  }, home.path, home.path);
+  return JSON.parse(await readFile(profile, 'utf8'));
+}
+
+test('the default task profile keeps the SDK Office tools and skills available', async () => {
+  const rows = await officeProfileRows();
+  const disabled = rows.filter(row => row.disabled).map(row => row.id);
+  assert.ok(!disabled.includes('skill-office'), 'The default task must discover the Office skills');
+  assert.ok(!disabled.includes('tool-office'), 'The default task must expose the Office tools after skill activation');
+});
+
+test('an explicit task tool selection keeps the bundled Office skills and tools closed', async () => {
+  const rows = await officeProfileRows({ toolIds: ['skill'] });
+  const disabled = rows.filter(row => row.disabled).map(row => row.id);
+  assert.ok(disabled.includes('skill-office'), 'Selecting custom Skills must preserve the assigned Skill catalogue');
+  assert.ok(disabled.includes('tool-office'), 'The Office tools require an applicable tool grant');
+});
+
+test('a task with named subagents does not register globally visible Office skills', async () => {
+  const rows = await officeProfileRows({ subagents: [{
+    name: 'reviewer', description: 'Review a draft', prompt: 'Review the draft', toolIds: [], skillNames: [],
+  }] });
+  assert.equal(rows.find(row => row.id === 'skill-office').disabled, true);
+});
 
 function namedReviewReply(messages) {
   const childPersona = messages.find(message => message.role === 'system'
