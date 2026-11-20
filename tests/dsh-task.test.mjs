@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { writeTaskProfile } from '../dist/dsh/profile.js';
+import { loadTaskConfig } from '../dist/task/config.js';
 
 const project = fileURLToPath(new URL('../', import.meta.url));
 
@@ -43,6 +44,45 @@ test('a task with named subagents does not register globally visible Office skil
     name: 'reviewer', description: 'Review a draft', prompt: 'Review the draft', toolIds: [], skillNames: [],
   }] });
   assert.equal(rows.find(row => row.id === 'skill-office').disabled, true);
+});
+
+async function officeTaskConfig({ subagents, managed = true } = {}) {
+  const cacheDir = join(project, '.cache');
+  await mkdir(cacheDir, { recursive: true });
+  await using workspace = await mkdtempDisposable(join(cacheDir, 'diagent-office-config-'));
+  const path = join(workspace.path, 'task.json');
+  await writeFile(path, JSON.stringify({
+    models: { default_model: 'fixture', models: { fixture: {
+      provider: 'openai', model: 'fixture-model', base_url: 'http://model.test/v1',
+    } } },
+    task: { task: 'Edit the attached deck', workspace: workspace.path, subagents,
+      tool_selection: { tool_ids: ['office'] } },
+  }));
+  return await loadTaskConfig({
+    TASK_CONFIG: path, DIAGENT_TASK_MODEL_REFRESH_PATH: managed ? join(workspace.path, 'refresh.json') : '',
+  });
+}
+
+test('the explicit Office grant loads bundled tools without loading custom Skills', async () => {
+  const config = await officeTaskConfig();
+  const rows = await officeProfileRows({ toolIds: config.toolIds });
+  const disabled = rows.filter(row => row.disabled).map(row => row.id);
+  assert.equal(disabled.includes('skill-office'), false);
+  assert.equal(disabled.includes('tool-office'), false);
+  assert.deepEqual(rows.find(row => row.id === 'skill-filesystem').config.customSkillDirs, []);
+  const selection = rows.at(-1).insert.find(row => row.id === 'diagent-tool-selection');
+  assert.deepEqual(selection.config.toolIds, ['skill', 'office_convert', 'office_render', 'office_recalculate']);
+});
+
+test('the explicit Office grant requires the managed task model bridge', async () => {
+  await assert.rejects(officeTaskConfig({ managed: false }), /Office tools require the managed task model bridge/);
+});
+
+test('the explicit Office grant rejects roles that would share the bundled Skill provider', async () => {
+  await assert.rejects(officeTaskConfig({ subagents: [{
+    name: 'reviewer', description: 'Review a draft', prompt: 'Review the draft',
+    tool_selection: { tool_ids: [] },
+  }] }), /Office tools cannot be enabled with named subagents/);
 });
 
 function namedReviewReply(messages) {
@@ -89,6 +129,15 @@ function namedMcpReply(messages) {
     : [[`delegate_${next}`, { name: next, description: 'Read the assigned source', prompt: 'Read your source.' }]];
 }
 
+function officeReply(toolResults, outsideDocument) {
+  if (toolResults.length === 0) return [['skill', { name: 'office-pptx' }]];
+  if (toolResults.length === 1) return [
+    ['skill', { name: 'smoke-skill' }],
+    ['office_convert', { input: outsideDocument, format: 'pdf' }],
+  ];
+  return toolResults.map(message => message.content).join('\n');
+}
+
 test('DSH task preserves the input, MCP and result contract with DiOS events disabled', { timeout: 120_000 }, async () => {
   const cacheDir = join(project, '.cache');
   await mkdir(cacheDir, { recursive: true });
@@ -97,6 +146,8 @@ test('DSH task preserves the input, MCP and result contract with DiOS events dis
   const workspace = scratch.path;
   const outsideRead = join(outside.path, 'outside.txt');
   await writeFile(outsideRead, 'fixture outside the workspace');
+  const outsideDocument = join(outside.path, 'outside.docx');
+  await writeFile(outsideDocument, 'fixture document outside the workspace');
   const skillDirectory = join(workspace, 'skills', 'smoke-skill');
   await mkdir(skillDirectory, { recursive: true });
   await writeFile(join(skillDirectory, 'SKILL.md'),
@@ -178,6 +229,7 @@ test('DSH task preserves the input, MCP and result contract with DiOS events dis
     const isSelectionTask = body.messages.some(message => message.role === 'user' && message.content === 'selected-mcp');
     const isTextTask = body.messages.some(message => message.role === 'user' && message.content === 'selected-task-tools');
     const isManagedToolTask = body.messages.some(message => message.role === 'user' && message.content === 'managed-tools');
+    const isOfficeTask = body.messages.some(message => message.role === 'user' && message.content === 'managed-office');
     const isNamedReview = body.messages.some(message => message.content?.includes('Reviewer fixture persona')
       || message.content === 'named-review');
     const isNamedMcp = body.messages.some(message => message.content?.includes('MCP child ')
@@ -189,8 +241,9 @@ test('DSH task preserves the input, MCP and result contract with DiOS events dis
     const hasToolResult = toolResults.length > 0;
     const toolCall = { index: 0, id: 'call-smoke', type: 'function',
       function: { name: 'mcp__smoke__lookup', arguments: '{}' } };
-    const reviewReply = isNamedReview ? namedReviewReply(body.messages) : isNamedMcp ? namedMcpReply(body.messages) : undefined;
-    const needsTool = isNamedReview || isNamedMcp ? Array.isArray(reviewReply)
+    const fixtureReply = isNamedReview ? namedReviewReply(body.messages) : isNamedMcp ? namedMcpReply(body.messages)
+      : isOfficeTask ? officeReply(toolResults, outsideDocument) : undefined;
+    const needsTool = isNamedReview || isNamedMcp || isOfficeTask ? Array.isArray(fixtureReply)
       : !isTextTask && (isBudgetTask ? toolResults.length < 3 : !hasToolResult);
     const toolCalls = isManagedToolTask ? [
       ['shell', { command: 'test -z "$DIAGENT_TASK_MODEL_REFRESH_PATH" && test ! -e refresh-private.json && printf shell-ok' }],
@@ -223,12 +276,12 @@ test('DSH task preserves the input, MCP and result contract with DiOS events dis
       : isSelectionTask ? [toolCall, { index: 1, id: 'call-unselected', type: 'function',
         function: { name: 'mcp__smoke__unselected', arguments: '{}' } }]
       : [{ ...toolCall, id: isBudgetTask ? 'call-smoke-next-round' : toolCall.id }];
-    const reviewCalls = Array.isArray(reviewReply) ? reviewReply.map(([name, args], index) => ({
+    const fixtureCalls = Array.isArray(fixtureReply) ? fixtureReply.map(([name, args], index) => ({
       index, id: `call-role-${body.messages.length}-${index}`, type: 'function',
       function: { name, arguments: JSON.stringify(args) },
     })) : undefined;
-    const delta = needsTool ? { tool_calls: reviewCalls ?? toolCalls } : {
-      content: reviewReply ?? (isBudgetTask || isShellTask || isManagedToolTask
+    const delta = needsTool ? { tool_calls: fixtureCalls ?? toolCalls } : {
+      content: fixtureReply ?? (isBudgetTask || isShellTask || isManagedToolTask
         ? toolResults.map(message => message.content).join('\n') : 'pilot-ok'),
     };
     const base = { id: 'chatcmpl-smoke', object: 'chat.completion.chunk', created: 1, model: 'smoke-model' };
@@ -310,6 +363,20 @@ test('DSH task preserves the input, MCP and result contract with DiOS events dis
       assert.doesNotMatch(tools.result, /fixture outside the workspace/);
       assert.equal(await readFile(join(workspace, 'managed-result.txt'), 'utf8'), 'authorized write');
       await assert.rejects(stat(join(outside.path, 'rejected.txt')), { code: 'ENOENT' });
+
+      await writeFile(refreshFile, JSON.stringify({ refresh_token: 'r'.repeat(43) }), { mode: 0o400 });
+      const officeRequest = modelRequests.length;
+      const office = await run('managed-office', 'office', '', { tool_selection: { tool_ids: ['office', 'skill', 'shell'] } },
+        { DIAGENT_TASK_MODEL_REFRESH_PATH: refreshFile });
+      assert.equal(office.code, 0, office.output);
+      const officeToolNames = request => request.tools.map(tool => tool.function.name).sort();
+      assert.deepEqual(officeToolNames(modelRequests[officeRequest]), ['shell', 'skill']);
+      assert.deepEqual(officeToolNames(modelRequests[officeRequest + 1]),
+        ['office_convert', 'office_recalculate', 'office_render', 'shell', 'skill']);
+      assert.match(office.result, /python-pptx/);
+      assert.match(office.result, /Test instructions/);
+      assert.match(office.result, /Task file tools only operate inside the workspace/);
+
       const reviewer = {
         name: 'reviewer', description: 'Review the submitted artifact',
         prompt: 'Reviewer fixture persona', tool_selection: { tool_ids: ['read'] },

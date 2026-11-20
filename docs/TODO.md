@@ -21,6 +21,8 @@ v0.1 的交付目标是用 TypeScript + DSH 完整替代现有 DiAgent。一次�
 
 ## 当前 ticket
 
+- [x] 一次性 CLI 任务支持显式 `office` 授权。代码和设计评审确认复用受管模型代理和工作区路径校验，保留具名子 Agent 隔离。锁定版 DSH Linux 回归验证 Office 与自定义 Skill 共存、工具按需激活、拒绝工作区外文件。独立 HTTP 控制器提前拒绝无法注入受管模型授权的 Office profile。隔离容器内使用模拟模型完成 DOCX/PPTX 新建、修改和 PDF 转换。目标部署联调待验证。
+
 - [x] 恢复一次性任务默认配置的 DSH Office Skills 和工具，保留显式工具名单与具名子 Agent 的授权。Linux 回归 20 项通过。锁定版 DSH 使用模拟模型加载 Office Skill，生成 Word 和 PPT 并通过 `office_convert` 转为 PDF。镜像内置字体可直接渲染中文 PPT。代码和设计评审确认模型回看预览图还需声明图片输入能力。
 - [x] 常驻 Chat 接收 DiOS 下发的推理预算。DSH 在生成请求前拦截超额步骤，工具轮次复用已有插件。隔离 Docker 验证 SSE 阻塞时一步预算只发出一次生成请求。常驻回归 30 项通过、1 项按平台跳过，任务和独立 API 17 项通过。代码与设计评审已核对两种入口和预算边界。
 - [x] 常驻 DSH 服务接回独立部署的旧工具目录、同步 CloudEvent、`session_id` 与会话管理。Linux Docker 常驻回归 27 项通过、1 项按平台跳过。代码和设计评审确认目录与旧工具选择共用发现规则，受管模式通过 DiOS 查询工具与管理会话，事件仍校验模型授权。

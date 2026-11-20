@@ -100,7 +100,9 @@ npm run test:task
 
 `task.tool_selection` 接受形如 `{"tool_ids":["skill","mcp"]}` 的对象，可选择 `skill`、`mcp` 和 `publish_event`。显式 `{"tool_ids":[]}` 关闭主 Agent 的常规工具，任务入口仍保存文本结果和日志。配置具名子 Agent 时，主 Agent 仍可委托给这些子 Agent。省略该字段沿用兼容默认值。选择 `skill` 时填写 `task.skill_names`。选择 `mcp` 时提供 MCP 配置，`task.tools` 若为非空名单会进一步过滤实际工具名。选择 `publish_event` 时需启用部署侧的事件开关。Task 镜像以 `org.hqit.diagent.task-tool-selection=1` 标明支持此契约。
 
-省略 `task.tool_selection` 且未配置具名子 Agent 时，一次性任务可以加载 DSH 自带的 `office`、`office-docx`、`office-pptx` 和 `office-xlsx`。加载 Office Skill 后可调用 DSH 的转换和重算工具。`office_render` 向模型返回页面图片，需要模型路由声明支持图片输入。Linux task 镜像提供中西文字体及 `python-docx`、`python-pptx` 和 `openpyxl` 制作库。显式工具名单和具名子 Agent 继续使用各自获准的 Skills 和工具。Office 文件写入任务工作区，DiOS 当前登记 Markdown 结果。
+省略 `task.tool_selection` 且未配置具名子 Agent 时，一次性任务可以加载 DSH 自带的 Office Skills。受管的一次性任务可在名单中显式选择 `office`，例如 `{"tool_ids":["office","shell"]}`。成功加载内置 `office`、`office-docx`、`office-pptx` 或 `office-xlsx` 后，DSH 会开放 `office_convert`、`office_render` 和 `office_recalculate`。用于渲染、PDF 转换和公式重算的内置操作 Skills 也可加载。`office_render` 向模型返回页面图片，需要模型路由声明支持图片输入。
+
+显式 Office 授权要求 Linux task 镜像和 `DIAGENT_TASK_MODEL_REFRESH_PATH` 指向的受管模型授权文件，适用于一次性 CLI 入口。独立任务 HTTP 控制器缺少受管模型代理，提交显式 `office` profile 时会返回配置错误。Office 工具的输入限于任务工作区，转换和重算的临时文件可经单独授权的 `shell` 复制到工作区。Linux task 镜像提供中西文字体及 `python-docx`、`python-pptx` 和 `openpyxl`。自定义 Skills 需要单独选择 `skill` 并填写 `task.skill_names`。配置具名子 Agent 时，共用的 Office Skills 提供器关闭，任务启动会拒绝显式 `office` 授权。Office 文件写入任务工作区，DiOS 当前登记 Markdown 结果。
 
 开启 DiOS 的任务模型代理和刷新后，可显式授予 `shell`、`read`、`write` 和 `edit`。原生文件工具检查任务工作区路径，写入及 Shell 由 DSH 使用工作区写入策略执行。Shell 可读取和修改沙箱允许的文件。刷新凭据由独立 UID 的本地进程读取，引导文件在 DSH 启动前销毁。此模式使用带 `org.hqit.diagent.task-model-refresh=1` 的 Linux 镜像和默认非特权 Docker 配置。
 

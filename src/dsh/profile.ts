@@ -12,7 +12,8 @@ const taskDisabled = [
   'tool-web', 'tool-plugin-manager', 'tool-schedule', 'tool-ask-user', 'tool-goal',
   'agent-instructions',
 ];
-const taskOffice = ['tool-office', 'skill-office'];
+const officePlugins = ['tool-office', 'skill-office'];
+const officeOperationTools = ['office_convert', 'office_render', 'office_recalculate'];
 const taskSubagentDisabled = ['tool-subagent', 'tool-subagent-fork', 'tool-agent-team'];
 
 interface ProfileSettings {
@@ -63,7 +64,7 @@ async function writeProfile(
     ] : []),
   ];
   const disabled = (entry === 'task'
-    ? [...sharedDisabled, ...taskDisabled, ...(settings.hasOffice ? [] : taskOffice),
+    ? [...sharedDisabled, ...taskDisabled, ...(settings.hasOffice ? [] : officePlugins),
       ...(settings.hasNamedSubagents ? taskSubagentDisabled : []),
       ...(settings.hasSubagentMcp ? ['mcp-resources'] : [])]
     : sharedDisabled)
@@ -202,10 +203,13 @@ export async function writeTaskProfile(config: TaskConfig, home: string, runDire
   const plugins: object[] = [...mcpPlugins];
   // DSH 在原生 Windows 上提供 PowerShell，Linux 镜像才是本工具的交付环境。
   const hasShell = process.platform === 'linux' && (config.toolIds === undefined || config.toolIds.includes('shell'));
+  const hasExplicitOffice = config.toolIds?.includes('office') === true;
   if (hasShell) plugins.push(localPlugin('legacy-shell', config.toolIds && { bashDelegationOnly: true }));
-  if (config.subagents.some(role => role.toolIds.some(id => taskFileTools.includes(id)))
+  if (hasExplicitOffice || config.subagents.some(role => role.toolIds.some(id => taskFileTools.includes(id)))
       || config.toolIds?.some(id => taskFileTools.includes(id))) {
-    plugins.push(localPlugin('task-file-scope', { workspace: config.workspace }));
+    plugins.push(localPlugin('task-file-scope', {
+      workspace: config.workspace, officeTools: hasExplicitOffice ? officeOperationTools : [],
+    }));
   }
   plugins.push(localPlugin('model-request', { temperature: config.temperature }));
   let selectedMcpTools: string[] | undefined;
@@ -234,8 +238,9 @@ export async function writeTaskProfile(config: TaskConfig, home: string, runDire
     }));
   }
   if (config.toolIds !== undefined || namedSubagents) {
+    const taskToolIds = config.toolIds?.flatMap(id => id === 'office' ? ['skill', ...officeOperationTools] : [id]);
     plugins.push(localPlugin('tool-selection', {
-      toolIds: config.toolIds && [...config.toolIds, ...(selectedMcpTools ?? []), ...(namedSubagents?.tools ?? [])],
+      toolIds: taskToolIds && [...new Set([...taskToolIds, ...(selectedMcpTools ?? []), ...(namedSubagents?.tools ?? [])])],
       mcpServerNames: selectedMcpTools === undefined ? mcpPlugins.map(plugin => plugin.config.serverName) : [],
       subagentTools: namedSubagents?.toolIdsByPreset,
     }));
@@ -252,7 +257,7 @@ export async function writeTaskProfile(config: TaskConfig, home: string, runDire
   return writeProfile(home, 'task', {
     model: config.model, skillRoots: namedSubagents ? [] : skillRoots, hasShell, hasNamedSubagents: Boolean(namedSubagents),
     // DSH 的 Office Skill 由全局 provider 注册。具名子 Agent 只读取按角色分配的 Skills。
-    hasOffice: config.toolIds === undefined && !namedSubagents,
+    hasOffice: !namedSubagents && (config.toolIds === undefined || hasExplicitOffice),
     // 子角色只订阅 MCP 工具。资源读取工具会绕过全局名单并注册到该会话。
     hasSubagentMcp: config.subagents.some(role => role.toolIds.includes('mcp')),
     personaPrefix: namedSubagents?.personaPrefix ?? personaPrefix,

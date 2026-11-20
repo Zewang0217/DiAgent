@@ -241,8 +241,14 @@ export async function loadTaskConfig(env: NodeJS.ProcessEnv): Promise<TaskConfig
       throw new TaskConfigError('task.tool_selection requires tool_ids and does not accept tool_config');
     }
     toolIds = [...new Set(stringList(selection.tool_ids, 'task.tool_selection.tool_ids'))];
-    if (toolIds.some(id => !['skill', 'mcp', 'publish_event', ...taskWorkspaceTools].includes(id))) {
+    if (toolIds.some(id => !['skill', 'mcp', 'publish_event', 'office', ...taskWorkspaceTools].includes(id))) {
       throw new TaskConfigError('task.tool_selection contains an unsupported tool');
+    }
+    if (toolIds.includes('office')) {
+      if (subagents.length > 0) throw new TaskConfigError('Office tools cannot be enabled with named subagents');
+      if (!env.DIAGENT_TASK_MODEL_REFRESH_PATH) {
+        throw new TaskConfigError('Office tools require the managed task model bridge');
+      }
     }
     if (toolIds.some(id => taskWorkspaceTools.includes(id)) && !env.DIAGENT_TASK_MODEL_REFRESH_PATH) {
       throw new TaskConfigError('Shell and file tools require the managed task model bridge');

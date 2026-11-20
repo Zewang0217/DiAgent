@@ -85,11 +85,14 @@ export async function loadTaskProfile(profile: string, prompt: string): Promise<
   }
 
   const { task, models } = template;
+  const selected = isObject(task.tool_selection) ? task.tool_selection.tool_ids : undefined;
+  if (Array.isArray(selected) && selected.includes('office')) {
+    throw new TaskApiError(500, 'Office tools require the managed task model bridge, unavailable in the standalone controller');
+  }
   const skills = profilePath(task.skills_dir ?? 'skills');
   const mcp = await mcpAssetPath(profile, task.mcp_config_path);
   const subagents = task.subagents == null ? undefined : await subagentAssets(profile, task.subagents);
   if (subagents?.some(role => role.mcp_config_path)) {
-    const selected = isObject(task.tool_selection) ? task.tool_selection.tool_ids : undefined;
     if (!Array.isArray(selected) || selected.includes('shell')) {
       throw new TaskApiError(500, 'Subagent MCP requires an explicit parent tool_selection without shell');
     }

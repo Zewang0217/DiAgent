@@ -94,6 +94,23 @@ test('the controller refuses a deployment profile with model keys or MCP authori
   });
 }));
 
+test('the controller rejects an explicit Office profile before starting a worker without the managed bridge', () => fixture(async options => {
+  const configPath = join(options.profiles, 'reviewer', 'agent-task.json');
+  const config = JSON.parse(await readFile(configPath, 'utf8'));
+  config.task.tool_selection = { tool_ids: ['office'] };
+  await writeFile(configPath, JSON.stringify(config));
+  let starts = 0;
+  const docker = { async start() { starts += 1; } };
+  await callApi(options, docker, async request => {
+    const response = await request('/v1/tasks', {
+      method: 'POST', body: JSON.stringify({ profile: 'reviewer', prompt: 'Edit a deck' }),
+    });
+    assert.equal(response.status, 500);
+    assert.match((await response.json()).detail, /Office tools require the managed task model bridge/);
+    assert.equal(starts, 0);
+  });
+}));
+
 test('an interrupted launch left in created is reported as failed and cleaned up', () => fixture(async options => {
   let removed = 0;
   const docker = {
