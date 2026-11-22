@@ -6,6 +6,13 @@ DiAgent 在 Docker 容器中运行智能体任务。本分支使用 TypeScript �
 
 两张 DSH 镜像的版本发布、部署选择和回滚见 [镜像发布与 Reviewer 验收](docs/2026-11-reviewer-cutover.md)。
 
+## Task 结果协议
+
+调度器可设置 `DIAGENT_TASK_PROTOCOL_DIR`，把一次性任务的运行事件写入 `events.ndjson`，并原子发布 `result.json`。结果含协议版本、终态、步数和可选产物清单。产物路径相对于工作区。协议不影响未设置该环境变量时的原有 CLI 文本输出。
+
+本地工具任务可以同时设置 `DIAGENT_TASK_PAUSE_ON_LIMIT=true`。达到步数上限时，Task 在下一次模型请求前停止并返回 `paused` 和 `checkpoint_ref`。调度器须保留同一协议目录及任务工作区，并确保两段不会并发执行。批准后使用原镜像和模型，在相同目录下带 `DIAGENT_TASK_RESUME_SESSION` 启动下一段。该机制从已保存的对话和工具结果继续处理，外部进程不属于检查点范围。
+
+
 ## TypeScript / DSH 常驻服务试点
 
 使用 Node.js 24.9 或更高版本。执行 `npm run build` 后运行 `npm run service:dsh`，服务在端口 `8000` 提供 `GET /health`，响应为 `{"status":"healthy"}`。执行 `npm run test:service` 验证 HTTP 契约。

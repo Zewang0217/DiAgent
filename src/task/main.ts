@@ -2,7 +2,8 @@
 import { appendFile, mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { loadTaskConfig, TaskConfigError } from './config.js';
-import { runDshTask } from '../dsh/task-runtime.js';
+import { DshTurnError, runDshTask } from '../dsh/task-runtime.js';
+import { TaskResultProtocol } from './result-protocol.js';
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -18,7 +19,8 @@ async function main(): Promise<void> {
 
   // 每次运行创建独立目录，同一输出根下的历史结果可以保留。
   await mkdir(config.outputDir, { recursive: true });
-  const runDirectory = await mkdtemp(join(config.outputDir, 'run-'));
+  const protocol = await TaskResultProtocol.open(process.env, config);
+  const runDirectory = protocol?.runDirectory ?? await mkdtemp(join(config.outputDir, 'run-'));
   const logPath = join(runDirectory, config.logFile);
   const resultPath = join(runDirectory, config.resultFile);
   await writeFile(logPath, '[start] DSH task\n');
@@ -32,16 +34,30 @@ async function main(): Promise<void> {
   const events: string[] = [];
 
   try {
-    const result = await runDshTask(config, runDirectory, signal, message => events.push(message));
+    const result = await runDshTask(
+      config, runDirectory, signal, message => events.push(message),
+      protocol?.checkpoint, protocol && (event => protocol.observe(event)),
+    );
     signal.throwIfAborted();
     await writeFile(resultPath, result, 'utf8');
     await appendFile(logPath, [...events, '[complete] Task completed', ''].join('\n'));
+    await protocol?.finish('completed', config, result);
     console.log('[complete] ' + resultPath);
   } catch (error) {
+    if (protocol && !signal.aborted && error instanceof DshTurnError && error.reason === 'error'
+        && await protocol.pausedAt(config.stepLimit)) {
+      await protocol.finish('paused', config);
+      await appendFile(logPath, [...events, '[pause] Task reached its step limit', ''].join('\n'));
+      return;
+    }
     const detail = errorMessage(signal.aborted ? signal.reason : error);
     const message = detail.replaceAll(config.model.apiKey, '[redacted]');
     await appendFile(logPath, [...events, '[error] ' + message, ''].join('\n'));
     await writeFile(resultPath, '任务执行失败：' + message + '\n', 'utf8');
+    const code = signal.aborted
+      ? signal.reason instanceof Error && signal.reason.name === 'TimeoutError' ? 'timeout' : 'interrupted'
+      : detail === 'Task exceeded its configured step limit' ? 'step_limit' : 'engine_error';
+    await protocol?.finish('failed', config, '', code);
     console.error('[error] ' + message);
     process.exitCode = error instanceof TaskConfigError ? 2 : 1;
   } finally {

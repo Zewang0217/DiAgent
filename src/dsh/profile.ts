@@ -192,7 +192,7 @@ async function namedSubagentProfile(config: TaskConfig, home: string, personaPre
  * @returns 启动 DSH 时加载的补丁路径。
  * @throws TaskConfigError 指定的 Skill 不可用，或 MCP 配置无效。
  */
-export async function writeTaskProfile(config: TaskConfig, home: string, runDirectory: string): Promise<string> {
+export async function writeTaskProfile(config: TaskConfig, home: string, runDirectory: string, budgetMarker?: string): Promise<string> {
   const skillRoots = config.toolIds !== undefined && !config.toolIds.includes('skill') ? []
     : config.skillNames.length === 0 ? (config.subagents.some(role => role.skillNames.length) ? [] : [config.skillsDir])
       : await selectedSkillRoots(config.skillsDir, config.skillNames, home);
@@ -211,7 +211,10 @@ export async function writeTaskProfile(config: TaskConfig, home: string, runDire
       workspace: config.workspace, officeTools: hasExplicitOffice ? officeOperationTools : [],
     }));
   }
-  plugins.push(localPlugin('model-request', { temperature: config.temperature }));
+  plugins.push(localPlugin('model-request', {
+    temperature: config.temperature,
+    ...(budgetMarker ? { stepLimit: config.stepLimit, budgetMarker } : {}),
+  }));
   let selectedMcpTools: string[] | undefined;
   if (mcpPlugins.length > 0 && config.mcpToolNames.length > 0) {
     const serverNames = mcpPlugins.map(plugin => plugin.config.serverName);

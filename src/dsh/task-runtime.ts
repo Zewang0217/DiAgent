@@ -2,14 +2,29 @@
 import { DeepSeekHarness, validatedSessionEvent } from '@deepseek-ai/dsh-sdk-client';
 import { pluginRecordOf, type SessionEvent } from '@deepseek-ai/dsh-session';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import type { TaskConfig } from '../task/config.js';
 import { openTaskModelBridge } from '../task/model-bridge.js';
 import { writeTaskProfile } from './profile.js';
 import { textDeltaRecord } from './plugins/chat-stream.js';
+
+/** 可恢复的运行由调度器持有 home，并固定会话 ID。 */
+export interface PersistentDshTurn {
+  home: string;
+  sessionId: string;
+  resume: boolean;
+  budgetMarker: string;
+}
+
+export class DshTurnError extends Error {
+  constructor(readonly reason: string, code?: string) {
+    super('DSH did not complete the task: ' + (code ? reason + ' (' + code + ')' : reason));
+  }
+}
 
 /**
  * 在配置的工作区启动独立 DSH 子进程，完成或取消后清理临时配置。
@@ -22,13 +37,17 @@ export async function runDshTask(
   runDirectory: string,
   signal: AbortSignal,
   log: (message: string) => void,
+  checkpoint?: PersistentDshTurn,
+  onTaskEvent?: (event: SessionEvent) => Promise<void>,
 ): Promise<string> {
   const credentialFile = process.env.DIAGENT_TASK_MODEL_REFRESH_PATH;
   await using bridge = credentialFile ? await openTaskModelBridge(config.model, credentialFile, signal) : undefined;
   const execution = bridge ? { ...config, model: bridge.model } : config;
   const writesWorkspace = config.toolIds === undefined || config.toolIds.some(id => ['shell', 'write', 'edit'].includes(id))
     || config.subagents.some(role => role.toolIds.some(id => ['write', 'edit'].includes(id)));
-  return await runDshTurn(execution, home => writeTaskProfile(execution, home, runDirectory), signal, log, {
+  return await runDshTurn(execution, home => writeTaskProfile(execution, home, runDirectory, checkpoint?.budgetMarker), signal, log, {
+    checkpoint,
+    onTaskEvent,
     dshBin: bridge ? fileURLToPath(new URL('./task-child.js', import.meta.url)) : undefined,
     toolEnv: {
       DIOS_API: config.isDiosEventPublishingEnabled ? process.env.DIOS_API || 'http://backend:8000' : '',
@@ -45,15 +64,18 @@ export async function runDshTurn(
   writeProfile: (home: string) => Promise<string>,
   signal: AbortSignal,
   log: (message: string) => void,
-  { toolEnv, permissionMode = 'read-only', onTextDelta, onToolStreamEvent, dshBin }: {
+  { toolEnv, permissionMode = 'read-only', onTextDelta, onToolStreamEvent, dshBin, checkpoint, onTaskEvent }: {
     toolEnv?: Pick<NodeJS.ProcessEnv, 'DIOS_API' | 'DIAGENT_EVENT_ACCESS_TOKEN' | 'GIT_PLATFORM_TOKEN'>;
     permissionMode?: 'workspace-write' | 'read-only';
     dshBin?: string;
+    checkpoint?: PersistentDshTurn;
+    onTaskEvent?: (event: SessionEvent) => Promise<void>;
     onTextDelta?: (text: string) => Promise<void>;
     onToolStreamEvent?: (event: SessionEvent<'assistant/message' | 'tool/call' | 'tool/result'>) => Promise<void>;
   } = {},
 ): Promise<string> {
-  const home = await mkdtemp(join(tmpdir(), 'diagent-dsh-'));
+  const home = checkpoint?.home ?? await mkdtemp(join(tmpdir(), 'diagent-dsh-'));
+  if (checkpoint) await mkdir(home, { recursive: true });
   try {
     const patch = await writeProfile(home);
     signal.throwIfAborted();
@@ -86,12 +108,17 @@ export async function runDshTurn(
     try {
       await harness.start();
       signal.throwIfAborted();
-      const sessionId = randomUUID();
+      const sessionId = checkpoint?.sessionId ?? randomUUID();
+      if (checkpoint?.resume) await harness.resumeSession(sessionId);
       const subscription = harness.client.subscribeSessionTree(sessionId);
       try {
         // 用协议层 prompt 保留原始任务文本，避免 SDK 把开头的 / 当成命令。
-        await harness.client.prompt(sessionId, [{ type: 'text', text: config.prompt }]);
-        const finished = harness.client.request('session/wait', { sessionId }).then(() => null);
+        const prompt = checkpoint?.resume
+          ? '继续完成当前任务。沿用历史中已完成的工具结果和工作区文件。' : config.prompt;
+        await harness.client.prompt(sessionId, [{ type: 'text', text: prompt }]);
+        const idle = harness.client.request('session/wait', { sessionId });
+        // wait 响应与最后一帧走不同的读取路径，等已入队的终态完成投递。
+        const finished = idle.then(() => delay(1000, null));
         let steps = 0;
         let startedRootStep = false;
         let reply = '';
@@ -105,10 +132,11 @@ export async function runDshTurn(
           const event = validatedSessionEvent(notification.params.event);
           if (event.type === 'step/start') {
             steps += 1;
-            if (steps > config.stepLimit) throw new Error('Task exceeded its configured step limit');
+            if (!checkpoint && steps > config.stepLimit) throw new Error('Task exceeded its configured step limit');
           }
           log('[dsh] ' + event.type);
           if (notification.params.sessionId !== sessionId) continue;
+          await onTaskEvent?.(event);
           if (event.type === 'step/start') startedRootStep = true;
           if (startedRootStep && onToolStreamEvent && (event.type === 'assistant/message'
             || event.type === 'tool/call' || event.type === 'tool/result')) {
@@ -124,12 +152,13 @@ export async function runDshTurn(
           } else if (event.type === 'turn/end') {
             reason = event.data.reason.kind;
             if (event.data.reason.kind === 'error') errorCode = event.data.reason.error.code;
+            break;
           }
         }
+        await idle;
         signal.throwIfAborted();
         if (reason !== 'completed') {
-          const detail = errorCode ? reason + ' (' + errorCode + ')' : reason ?? 'missing turn end';
-          throw new Error('DSH did not complete the task: ' + detail);
+          throw new DshTurnError(reason ?? 'missing turn end', errorCode);
         }
         return reply;
       } finally {
@@ -139,6 +168,6 @@ export async function runDshTurn(
       signal.removeEventListener('abort', stop);
     }
   } finally {
-    await rm(home, { recursive: true, force: true });
+    if (!checkpoint) await rm(home, { recursive: true, force: true });
   }
 }
