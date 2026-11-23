@@ -83,7 +83,10 @@ export function modelProfileRow(model: TaskConfig['model']): object {
     api: 'openai-completions',
     baseURL: model.baseURL,
     compat: { supportsDeveloperRole: false, maxTokensField: 'max_tokens' },
-    models: [{ id: model.name, contextWindow: model.contextWindow }],
+    models: [{
+      id: model.name, contextWindow: model.contextWindow,
+      ...(model.inputModalities ? { input: model.inputModalities } : {}),
+    }],
   } } } };
 }
 

@@ -1,14 +1,16 @@
 /** 通过真实 DSH 子进程验证一次性任务，模型和 MCP 服务使用本机模拟端点。 */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdir, mkdtempDisposable, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { writeTaskProfile } from '../dist/dsh/profile.js';
-import { loadTaskConfig } from '../dist/task/config.js';
+import { modelProfileRow, writeTaskProfile } from '../dist/dsh/profile.js';
+import { loadTaskConfig, parseModelConfig } from '../dist/task/config.js';
+import { openTaskModelBridge } from '../dist/task/model-bridge.js';
 
 const project = fileURLToPath(new URL('../', import.meta.url));
 
@@ -30,6 +32,48 @@ test('the default task profile keeps the SDK Office tools and skills available',
   const disabled = rows.filter(row => row.disabled).map(row => row.id);
   assert.ok(!disabled.includes('skill-office'), 'The default task must discover the Office skills');
   assert.ok(!disabled.includes('tool-office'), 'The default task must expose the Office tools after skill activation');
+});
+
+test('a declared image input reaches the DSH model profile', () => {
+  const model = parseModelConfig({ fixture: {
+    provider: 'openai', model: 'fixture-model', base_url: 'http://model.test/v1',
+    input_modalities: ['text', 'image'],
+  } }, 'fixture');
+  const row = modelProfileRow(model);
+  assert.deepEqual(row.config.providers['diagent-model'].models[0].input, ['text', 'image']);
+});
+
+test('the managed model bridge forwards a large image request only for an image route', {
+  skip: process.platform !== 'linux' || process.getuid?.() !== 0,
+}, async () => {
+  await using upstream = createServer((request, response) => {
+    request.resume();
+    request.once('end', () => response.writeHead(200).end('ok'));
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+  const cacheDir = join(project, '.cache');
+  await mkdir(cacheDir, { recursive: true });
+  await using area = await mkdtempDisposable(join(cacheDir, 'diagent-image-bridge-'));
+  const body = JSON.stringify({ messages: [{ role: 'user', content: [{
+    type: 'image_url', image_url: { url: 'data:image/png;base64,' + 'A'.repeat(1024 * 1024) },
+  }] }] });
+  const statuses = [];
+  for (const inputModalities of [['text'], ['text', 'image']]) {
+    const refresh = join(area.path, 'refresh.json');
+    await writeFile(refresh, JSON.stringify({ refresh_token: 'a'.repeat(43) }));
+    const signal = AbortSignal.timeout(15_000);
+    await using bridge = await openTaskModelBridge({
+      name: 'fixture-model', baseURL: `http://127.0.0.1:${upstream.address().port}/v1`,
+      apiKey: 'fixture', inputModalities,
+    }, refresh, signal);
+    const result = await fetch(bridge.model.baseURL + '/chat/completions', {
+      method: 'POST', headers: { Authorization: `Bearer ${bridge.model.apiKey}` }, body, signal,
+    });
+    statuses.push(result.status);
+    await result.body?.cancel();
+  }
+  assert.deepEqual(statuses, [413, 200]);
 });
 
 test('an explicit task tool selection keeps the bundled Office skills and tools closed', async () => {

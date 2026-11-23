@@ -12,6 +12,9 @@ import { fileURLToPath } from 'node:url';
 import type { TaskConfig } from './config.js';
 
 const brokerUid = 65534;
+const textRequestLimit = 1024 * 1024;
+// DSH 发送 Base64 图像时，需要为原始图片预算和消息结构预留空间。
+const imageRequestLimit = 32 * textRequestLimit;
 interface BridgeOptions {
   model: TaskConfig['model'];
   localKey: string;
@@ -67,6 +70,7 @@ async function serveBridge({ model, localKey, credentialFile }: BridgeOptions): 
   await unlink(credentialFile);
   if (typeof refreshToken !== 'string' || !/^[\w-]{43}$/.test(refreshToken)) throw new Error('Invalid refresh credential');
   const base = model.baseURL.replace(/\/+$/, '');
+  const requestLimit = model.inputModalities?.includes('image') ? imageRequestLimit : textRequestLimit;
   let accessToken = model.apiKey;
   let refreshing: Promise<void> | undefined;
 
@@ -95,7 +99,7 @@ async function serveBridge({ model, localKey, credentialFile }: BridgeOptions): 
       let size = 0;
       for await (const chunk of request) {
         size += chunk.length;
-        if (size > 1_048_576) { response.writeHead(413).end(); return; }
+        if (size > requestLimit) { response.writeHead(413).end(); return; }
         chunks.push(chunk);
       }
       const body = Buffer.concat(chunks);

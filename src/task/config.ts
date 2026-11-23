@@ -48,6 +48,7 @@ export interface TaskConfig {
     baseURL: string;
     apiKey: string;
     contextWindow?: number;
+    inputModalities?: string[];
   };
 }
 
@@ -67,12 +68,18 @@ export function parseModelConfig(
   if (!URL.canParse(baseURL) || !['http:', 'https:'].includes(new URL(baseURL).protocol)) {
     throw new TaskConfigError('model.base_url must be an HTTP(S) URL');
   }
+  const inputModalities = model.input_modalities == null ? undefined
+    : stringList(model.input_modalities, 'model.input_modalities');
+  if (inputModalities && (!inputModalities.includes('text') || inputModalities.some(value => value !== 'text' && value !== 'image'))) {
+    throw new TaskConfigError('model.input_modalities must include text and may include image');
+  }
   return {
     name: requiredText(model.model, 'model.model'),
     baseURL,
     apiKey: text(model.api_key || fallbackApiKey, 'model.api_key', 'not-needed'),
     contextWindow: model.context_length == null ? undefined
       : positiveInteger(model.context_length, 'model.context_length'),
+    ...(inputModalities ? { inputModalities } : {}),
   };
 }
 
