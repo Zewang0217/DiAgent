@@ -13,7 +13,7 @@
     "task-api:dsh": "node dist/task-api/server.js",
     "test:task-api": "npm run build && node --test tests/standalone-task-api.test.mjs",
     "test:service": "npm run build && node --test tests/dsh-service.test.mjs",
-    "test:task": "npm run build && node --test --test-concurrency=1 tests/dsh-task.test.mjs tests/publish-event.test.mjs tests/task-result-protocol.test.mjs tests/task-tool-events.test.mjs tests/task-host-tools.test.mjs tests/task-custom-skills.test.mjs"
+    "test:task": "npm run build && node --test --test-concurrency=1 tests/dsh-task.test.mjs tests/publish-event.test.mjs tests/task-result-protocol.test.mjs tests/task-tool-events.test.mjs tests/task-host-tools.test.mjs tests/task-custom-skills.test.mjs tests/task-protocol-schema.test.mjs"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "4.1.0",
@@ -31,6 +31,7 @@
   },
   "devDependencies": {
     "@types/node": "24.9.1",
+    "ajv": "^8.20.0",
     "typescript": "5.9.3"
   },
   "overrides": {

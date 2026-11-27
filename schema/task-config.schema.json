@@ -1,0 +1,181 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://diagent.local/schema/task-config.schema.json",
+  "title": "DiAgent task configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["models", "task"],
+  "properties": {
+    "models": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["models"],
+      "properties": {
+        "default_model": { "type": "string", "minLength": 1 },
+        "models": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "type": "string", "minLength": 1 },
+          "additionalProperties": { "$ref": "#/definitions/model" }
+        }
+      }
+    },
+    "app": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "LLM_MODELS_CONFIG_PATH": { "type": "string" },
+        "LLM_DEFAULT_MODEL": { "type": "string" },
+        "LLM_OPENAI_API_KEY": { "type": "string" },
+        "AGENT_SYSTEM_PROMPT": { "type": "string" },
+        "MCP_CONFIG_PATH": { "type": "string" }
+      }
+    },
+    "task": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "$ref": "#/definitions/task" }
+      ]
+    }
+  },
+  "definitions": {
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "model", "base_url"],
+      "properties": {
+        "provider": { "enum": ["openai", "vllm"] },
+        "model": { "type": "string", "minLength": 1 },
+        "base_url": { "type": "string", "minLength": 1, "description": "HTTP(S) model endpoint" },
+        "api_key": { "type": "string" },
+        "context_length": { "type": "integer", "minimum": 1 },
+        "input_modalities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["text", "image"] },
+          "contains": { "const": "text" }
+        }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task"],
+      "properties": {
+        "task": { "type": "string", "minLength": 1 },
+        "system_prompt": { "type": "string" },
+        "model": { "type": "string" },
+        "workspace": { "type": "string" },
+        "skills_dir": { "type": "string" },
+        "skill_names": { "$ref": "#/definitions/skillNames" },
+        "extra_skill_roots": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "tool_selection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool_ids"],
+          "properties": {
+            "tool_ids": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" }
+            }
+          }
+        },
+        "tools": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "host_tools": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/definitions/hostTool" }
+        },
+        "mcp_config_path": { "type": "string" },
+        "subagents": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/subagent" }
+        },
+        "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
+        "recursion_limit": { "type": "integer", "minimum": 1 },
+        "max_tool_rounds": { "type": "integer", "minimum": 1 },
+        "output": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "result_file": { "$ref": "#/definitions/fileName" },
+            "log_file": { "$ref": "#/definitions/fileName" }
+          }
+        },
+        "output_dir": { "type": "string" },
+        "trigger": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": { "enum": ["once"] },
+            "cron": { "type": ["string", "null"] },
+            "interval_seconds": { "type": ["integer", "null"], "minimum": 1 }
+          }
+        }
+      }
+    },
+    "subagent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "description", "tool_selection"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,47}$" },
+        "description": { "type": "string", "minLength": 1 },
+        "prompt": { "type": "string", "minLength": 1 },
+        "system_prompt": { "type": "string", "minLength": 1 },
+        "model": { "type": "string" },
+        "tool_selection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool_ids"],
+          "properties": {
+            "tool_ids": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "enum": ["skill", "mcp", "read", "write", "edit"] }
+            }
+          }
+        },
+        "skill_names": { "$ref": "#/definitions/skillNames" },
+        "skills_dir": { "type": "string" },
+        "mcp_config_path": { "type": "string" }
+      },
+      "anyOf": [{ "required": ["prompt"] }, { "required": ["system_prompt"] }]
+    },
+    "hostTool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "description", "parameters"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+        "description": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "parameters": {
+          "type": "object",
+          "required": ["type"],
+          "properties": { "type": { "const": "object" } }
+        }
+      }
+    },
+    "skillNames": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 64 }
+    },
+    "fileName": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^/\\\\]+$",
+      "description": "Single file name within the run directory"
+    }
+  }
+}

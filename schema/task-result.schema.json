@@ -1,0 +1,43 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://diagent.local/schema/task-result.schema.json",
+  "title": "DiAgent task result v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "status", "summary", "artifacts", "steps"],
+  "properties": {
+    "version": { "const": 2 },
+    "status": { "enum": ["completed", "failed", "paused"] },
+    "summary": { "type": "string", "maxLength": 4096 },
+    "error_code": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$",
+      "description": "Stable failure code; absent for completed and paused"
+    },
+    "error": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$",
+      "description": "v1-compatible copy of error_code"
+    },
+    "artifacts": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Workspace-relative path"
+      }
+    },
+    "steps": { "type": "integer", "minimum": 0 },
+    "checkpoint_ref": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$"
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "failed" } }, "required": ["status"] },
+      "then": { "required": ["error_code"] }
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://diagent.local/schema/task-events.schema.json",
+  "title": "DiAgent task event line",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "seq", "type", "at"],
+  "properties": {
+    "version": { "const": 1 },
+    "seq": { "type": "integer", "minimum": 1 },
+    "at": { "type": "integer", "minimum": 0 },
+    "type": {
+      "enum": ["started", "step_started", "tool_started", "tool_finished", "finished"]
+    },
+    "steps": { "type": "integer", "minimum": 1 },
+    "tool": { "type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,64}$" },
+    "skill": { "type": "string", "maxLength": 64 },
+    "call_id": { "type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,128}$" },
+    "success": { "type": "boolean" },
+    "status": { "enum": ["completed", "failed", "paused"] },
+    "error": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "step_started" } }, "required": ["type"] },
+      "then": { "required": ["steps"] }
+    },
+    {
+      "if": { "properties": { "type": { "const": "tool_started" } }, "required": ["type"] },
+      "then": { "required": ["tool"] }
+    },
+    {
+      "if": { "properties": { "type": { "const": "tool_finished" } }, "required": ["type"] },
+      "then": { "required": ["success"] }
+    },
+    {
+      "if": { "properties": { "type": { "const": "finished" } }, "required": ["type"] },
+      "then": { "required": ["status"] }
+    }
+  ]
+}
