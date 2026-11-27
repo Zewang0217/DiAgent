@@ -33,6 +33,17 @@ test('pairs tool starts and out-of-order results by call id', async context => {
   assert.ok(!text.includes('private-command'));
 });
 
+test('skill events carry the invoked skill name without a product prefix', async context => {
+  const { protocol, file } = await makeProtocol(context);
+  await protocol.observe({
+    type: 'tool/call',
+    data: { callId: 'skill-call', name: 'skill', arguments: JSON.stringify({ name: 'docx' }) },
+  });
+  const events = (await readFile(file, 'utf8')).trim().split('\n').map(JSON.parse);
+
+  assert.equal(events.find(event => event.type === 'tool_started').skill, 'docx');
+});
+
 test('does not expose malformed call ids as paths or unbounded text', async context => {
   const { protocol, file } = await makeProtocol(context);
   await protocol.observe({ type: 'tool/call', data: { callId: '/private/host/path', name: 'shell', arguments: 'private-command' } });

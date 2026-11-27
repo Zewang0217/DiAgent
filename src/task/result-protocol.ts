@@ -73,11 +73,7 @@ export class TaskResultProtocol {
       await this.writeEvent('step_started', { steps: this.steps });
     } else if (event.type === 'tool/call') {
       const tool = /^[\w-]{1,64}$/.test(event.data.name) ? event.data.name : 'unknown';
-      let skill: string | undefined;
-      if (tool === 'skill') {
-        const name = /"name"\s*:\s*"(office-(?:docx|xlsx|pptx))"/.exec(event.data.arguments)?.[1];
-        skill = name;
-      }
+      const skill = tool === 'skill' ? skillName(event.data.arguments) : undefined;
       await this.writeEvent('tool_started', {
         tool, skill, call_id: toolCallId.test(event.data.callId) ? event.data.callId : undefined,
       });
@@ -101,10 +97,12 @@ export class TaskResultProtocol {
   }
 
   async finish(status: TaskStatus, config: TaskConfig, summary = '', errorCode?: string): Promise<void> {
-    const excluded = new Set([config.logFile, config.resultFile]);
-    const rows = status === 'completed' ? await readdir(this.runDirectory, { withFileTypes: true }) : [];
-    const artifacts = rows.filter(row => row.isFile() && !excluded.has(row.name))
-      .map(row => relative(this.workspace, join(this.runDirectory, row.name)).split(sep).join('/'));
+    const artifacts: string[] = [];
+    if (status === 'completed') {
+      await collectArtifacts(
+        this.runDirectory, this.workspace, new Set([config.logFile, config.resultFile]), artifacts,
+      );
+    }
     const result = {
       version: 2, status, summary: summary.slice(0, 4096).toWellFormed(),
       // error 字段保留给只理解 v1 的旧调度器；新调度器读取 error_code。
@@ -115,6 +113,33 @@ export class TaskResultProtocol {
     await writeResultFile(this.directory, result);
     await this.writeEvent('finished', { status, error: errorCode });
   }
+}
+
+function skillName(argumentsValue: unknown): string | undefined {
+  if (typeof argumentsValue !== 'string') return undefined;
+  try {
+    const name = (JSON.parse(argumentsValue) as { name?: unknown } | null)?.name;
+    return typeof name === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name) ? name : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function collectArtifacts(
+  directory: string, workspace: string, excluded: Set<string>, artifacts: string[], depth = 0,
+): Promise<void> {
+  if (artifacts.length >= 1000 || depth > 4) return;
+  for (const row of await readdir(directory, { withFileTypes: true })) {
+    if (artifacts.length >= 1000) return;
+    if (row.isSymbolicLink()) continue;
+    const path = join(directory, row.name);
+    if (row.isDirectory()) {
+      await collectArtifacts(path, workspace, excluded, artifacts, depth + 1);
+    } else if (row.isFile() && !excluded.has(row.name)) {
+      artifacts.push(relative(workspace, path).split(sep).join('/'));
+    }
+  }
+  artifacts.sort();
 }
 
 async function writeResultFile(directory: string, result: object): Promise<void> {

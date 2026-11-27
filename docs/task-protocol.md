@@ -112,7 +112,7 @@ node --test tests/task-protocol-schema.test.mjs
 | `status` | `completed` / `paused` / `failed` |
 | `error_code` | 稳定失败码；完成和暂停时省略 |
 | `error` | `error_code` 的 v1 兼容副本 |
-| `artifacts` | `output/run-task` 下的工作区相对路径 |
+| `artifacts` | `output/run-task` 下递归收集的工作区相对路径（深度 ≤ 4，最多 1000 个文件） |
 | `steps` | 本段执行的模型步数 |
 | `checkpoint_ref` | 暂停时可恢复的 DSH 会话 UUID |
 
