@@ -100,19 +100,36 @@ export class TaskResultProtocol {
     }
   }
 
-  async finish(status: TaskStatus, config: TaskConfig, summary = '', error?: string): Promise<void> {
+  async finish(status: TaskStatus, config: TaskConfig, summary = '', errorCode?: string): Promise<void> {
     const excluded = new Set([config.logFile, config.resultFile]);
     const rows = status === 'completed' ? await readdir(this.runDirectory, { withFileTypes: true }) : [];
     const artifacts = rows.filter(row => row.isFile() && !excluded.has(row.name))
       .map(row => relative(this.workspace, join(this.runDirectory, row.name)).split(sep).join('/'));
     const result = {
-      version: 1, status, summary: summary.slice(0, 4096).toWellFormed(), error, artifacts,
+      version: 2, status, summary: summary.slice(0, 4096).toWellFormed(),
+      // error 字段保留给只理解 v1 的旧调度器；新调度器读取 error_code。
+      error_code: errorCode, error: errorCode, artifacts,
       steps: status === 'paused' ? config.stepLimit : this.steps,
       ...(status === 'paused' && this.checkpoint ? { checkpoint_ref: this.checkpoint.sessionId } : {}),
     };
-    const file = join(this.directory, 'result.json');
-    await writeFile(file + '.tmp', JSON.stringify(result) + '\n');
-    await rename(file + '.tmp', file);
-    await this.writeEvent('finished', { status, error });
+    await writeResultFile(this.directory, result);
+    await this.writeEvent('finished', { status, error: errorCode });
   }
+}
+
+async function writeResultFile(directory: string, result: object): Promise<void> {
+  const file = join(directory, 'result.json');
+  await writeFile(file + '.tmp', JSON.stringify(result) + '\n');
+  await rename(file + '.tmp', file);
+}
+
+/** 配置在协议对象建立前失败时，仍向调度器发布稳定终态。 */
+export async function writeFailureResult(env: NodeJS.ProcessEnv, errorCode: string): Promise<void> {
+  const directory = env.DIAGENT_TASK_PROTOCOL_DIR;
+  if (!directory || !isAbsolute(directory) || !/^[a-z_]{1,64}$/.test(errorCode)) return;
+  await mkdir(directory, { recursive: true });
+  await writeResultFile(directory, {
+    version: 2, status: 'failed', summary: '', error_code: errorCode, error: errorCode,
+    artifacts: [], steps: 0,
+  });
 }

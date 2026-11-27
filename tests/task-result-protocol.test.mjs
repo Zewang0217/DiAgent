@@ -6,8 +6,25 @@ import { createServer } from 'node:http';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
+import { writeFailureResult } from '../dist/task/result-protocol.js';
 
 const exec = promisify(execFile);
+
+test('a config failure publishes a stable result code', async () => {
+  const directory = await mkdtemp(resolve('.task-protocol-failure-'));
+  try {
+    await writeFailureResult({ DIAGENT_TASK_PROTOCOL_DIR: directory }, 'invalid_config');
+    const result = JSON.parse(await readFile(join(directory, 'result.json'), 'utf8'));
+
+    assert.equal(result.version, 2);
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error_code, 'invalid_config');
+    assert.equal(result.error, 'invalid_config');
+    assert.equal(result.steps, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('pauses before a new model request and restores the completed shell result', {
   skip: process.platform !== 'linux',

@@ -3,7 +3,7 @@ import { appendFile, mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { loadTaskConfig, TaskConfigError } from './config.js';
 import { DshTurnError, runDshTask } from '../dsh/task-runtime.js';
-import { TaskResultProtocol } from './result-protocol.js';
+import { TaskResultProtocol, writeFailureResult } from './result-protocol.js';
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -66,7 +66,13 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch(error => {
+main().catch(async error => {
+  const code = error instanceof TaskConfigError ? 'invalid_config' : 'engine_error';
+  try {
+    await writeFailureResult(process.env, code);
+  } catch {
+    // 协议目录不可写时不能掩盖原始启动错误。
+  }
   console.error('[error] ' + errorMessage(error));
   process.exitCode = error instanceof TaskConfigError ? 2 : 1;
 });
