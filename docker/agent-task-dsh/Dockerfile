@@ -38,3 +38,8 @@ LABEL org.hqit.diagent.model-socket="1"
 LABEL org.hqit.diagent.task-subagents="1"
 LABEL org.hqit.diagent.task-subagent-resources="1"
 ENTRYPOINT ["node", "--disable-sigusr1", "dist/task/main.js"]
+
+# 原生 Office 任务镜像使用系统 LibreOffice，移除 SDK 自带的重复 Office 后端。
+FROM runtime AS office-task
+COPY docker/agent-task-office/prune-sdk-office.mjs ./prune-sdk-office.mjs
+RUN node ./prune-sdk-office.mjs && rm ./prune-sdk-office.mjs
