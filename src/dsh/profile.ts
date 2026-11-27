@@ -1,5 +1,5 @@
 /** 为 Task 和 Chat 生成私有的 DSH profile，按入口保留既有能力规则。 */
-import { mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, realpath, stat, symlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isStreamableHttpTransport, TaskConfigError, taskFileTools, type TaskConfig } from '../task/config.js';
@@ -95,8 +95,18 @@ export async function selectedSkillRoots(
   skillsDir: string, skillNames: string[], home: string, viewName = 'selected-skills',
 ): Promise<string[]> {
   if (skillNames.length === 0) return [];
+  if (!viewName || ['.', '..'].includes(viewName) || /[\\/]/.test(viewName)
+      || skillNames.some(name => !name || ['.', '..'].includes(name) || /[\\/:]/.test(name))) {
+    throw new TaskConfigError('Selected skill view requires single directory names');
+  }
   const selectedRoot = join(home, viewName);
-  await mkdir(selectedRoot);
+  await mkdir(selectedRoot, { recursive: true });
+  const root = await lstat(selectedRoot);
+  if (root.isSymbolicLink() || !root.isDirectory()) throw new TaskConfigError('Selected skill view is invalid');
+  const entries = await readdir(selectedRoot, { withFileTypes: true });
+  if (entries.some(entry => !entry.isSymbolicLink() || !skillNames.includes(entry.name))) {
+    throw new TaskConfigError('Selected skill view contains an unexpected entry');
+  }
   for (const name of skillNames) {
     const directory = join(skillsDir, name);
     try {
@@ -104,7 +114,16 @@ export async function selectedSkillRoots(
     } catch {
       throw new TaskConfigError('Selected skill has no readable SKILL.md: ' + name);
     }
-    await symlink(directory, join(selectedRoot, name), process.platform === 'win32' ? 'junction' : 'dir');
+    const target = join(selectedRoot, name);
+    try {
+      await symlink(directory, target, process.platform === 'win32' ? 'junction' : 'dir');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      // 恢复只复用仍指向原授权目录的链接，不删除或覆盖无法核对的既有文件。
+      if (!(await lstat(target)).isSymbolicLink() || await realpath(target) !== await realpath(directory)) {
+        throw new TaskConfigError('Selected skill view changed during resume');
+      }
+    }
   }
   return [selectedRoot];
 }

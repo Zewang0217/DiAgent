@@ -18,6 +18,8 @@ DiAgent 在 Docker 容器中运行智能体任务。本分支使用 TypeScript �
 
 宿主固化的只读技能快照可通过 `task.extra_skill_roots` 增补当前镜像的已选技能根，须同时设置 `DIAGENT_TASK_CUSTOM_SKILLS=true` 并显式批准 `skill`，不能与具名子 Agent 共用。宿主须按 profile 白名单固化包，校验 frontmatter 名称与授权目录一致，使用小写 kebab-case，拒绝与内置技能重名，并在恢复时核对原内容与安全权限。额外根须只读挂载；任务文件不能自行开放新的宿主目录。
 
+恢复已选技能时会核验并复用原私有链接视图。根目录被替换成链接、出现未授权条目或链接真实目标变化时拒绝启动，不删除或覆盖无法核对的文件；宿主仍负责保持检查点原授权和只读快照。
+
 
 ## TypeScript / DSH 常驻服务试点
 

@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
@@ -50,10 +50,42 @@ test('task configuration cannot self-authorize extra host skill roots', async co
   await assert.rejects(loadTaskConfig({ ...env, DIAGENT_TASK_CUSTOM_SKILLS: '' }), /managed.*skill/i);
 });
 
-test('real DSH discovers and reads the approved custom skill', {
-  skip: process.platform !== 'linux', timeout: 30000,
+test('rebuilding a persisted selected skill view preserves the original grant', async context => {
+  const { directory, env } = await fixture(context);
+  const config = await loadTaskConfig(env);
+  const home = join(directory, 'home');
+  const first = await writeTaskProfile(config, home, join(config.workspace, 'output/run-task'));
+
+  const resumed = await writeTaskProfile(config, home, join(config.workspace, 'output/run-task'));
+
+  assert.equal(resumed, first);
+});
+
+test('a persisted skill view cannot redirect its root outside the private view', async context => {
+  const { directory, env } = await fixture(context);
+  const config = await loadTaskConfig(env);
+  const unrelated = join(directory, 'unrelated');
+  await mkdir(unrelated);
+  await symlink(unrelated, join(directory, 'home/selected-skills'), process.platform === 'win32' ? 'junction' : 'dir');
+
+  await assert.rejects(writeTaskProfile(config, join(directory, 'home'), join(config.workspace, 'output/run-task')), /skill view is invalid/i);
+  assert.deepEqual(await readdir(unrelated), []);
+});
+
+test('a persisted skill view cannot retain entries outside the original grant', async context => {
+  const { directory, env } = await fixture(context);
+  const config = await loadTaskConfig(env);
+  const home = join(directory, 'home');
+  await writeTaskProfile(config, home, join(config.workspace, 'output/run-task'));
+  await mkdir(join(home, 'selected-skills/unapproved'));
+
+  await assert.rejects(writeTaskProfile(config, home, join(config.workspace, 'output/run-task')), /unexpected entry/i);
+});
+
+test('real DSH restores selected bundled and custom skills in another process', {
+  skip: process.platform !== 'linux', timeout: 60000,
 }, async context => {
-  const { env } = await fixture(context);
+  const { directory, env } = await fixture(context);
   const requests = [];
   const server = createServer(async (request, response) => {
     let raw = '';
@@ -81,10 +113,22 @@ test('real DSH discovers and reads the approved custom skill', {
   });
   const configuration = JSON.parse(await readFile(env.TASK_CONFIG, 'utf8'));
   configuration.models.models.fixture.base_url = 'http://127.0.0.1:' + server.address().port + '/v1';
+  configuration.task.recursion_limit = 1;
+  await writeFile(env.TASK_CONFIG, JSON.stringify(configuration));
+  const control = join(directory, 'control');
+  await mkdir(control);
+  const executionEnv = { ...process.env, ...env, DIAGENT_TASK_TIMEOUT_MS: '20000',
+    OUTPUT_DIR: join(configuration.task.workspace, 'output'),
+    DIAGENT_TASK_PROTOCOL_DIR: control, DIAGENT_TASK_PAUSE_ON_LIMIT: 'true' };
+  const execute = promisify(execFile);
+  await execute(process.execPath, [resolve('dist/task/main.js')], { cwd: process.cwd(), timeout: 25000, env: executionEnv });
+  const paused = JSON.parse(await readFile(join(control, 'result.json'), 'utf8'));
+  assert.equal(paused.status, 'paused');
+  configuration.task.recursion_limit = 2;
   await writeFile(env.TASK_CONFIG, JSON.stringify(configuration));
 
-  const result = await promisify(execFile)(process.execPath, [resolve('dist/task/main.js')], {
-    cwd: process.cwd(), timeout: 25000, env: { ...process.env, ...env, DIAGENT_TASK_TIMEOUT_MS: '20000' },
+  const result = await execute(process.execPath, [resolve('dist/task/main.js')], {
+    cwd: process.cwd(), timeout: 25000, env: { ...executionEnv, DIAGENT_TASK_RESUME_SESSION: paused.checkpoint_ref },
   });
 
   const completed = /\[complete\] (.+)/.exec(result.stdout);
