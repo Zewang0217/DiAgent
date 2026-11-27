@@ -196,14 +196,21 @@ async function namedSubagentProfile(config: TaskConfig, home: string, personaPre
  * @throws TaskConfigError 指定的 Skill 不可用，或 MCP 配置无效。
  */
 export async function writeTaskProfile(config: TaskConfig, home: string, runDirectory: string, budgetMarker?: string): Promise<string> {
-  const skillRoots = config.toolIds !== undefined && !config.toolIds.includes('skill') ? []
-    : config.skillNames.length === 0 ? (config.subagents.some(role => role.skillNames.length) ? [] : [config.skillsDir])
+  const primarySkillRoots = config.toolIds !== undefined && !config.toolIds.includes('skill') ? []
+    : config.skillNames.length === 0 ? (config.subagents.some(role => role.skillNames.length) || config.extraSkillRoots?.length ? [] : [config.skillsDir])
       : await selectedSkillRoots(config.skillsDir, config.skillNames, home);
+  if (config.extraSkillRoots?.length && (!config.toolIds?.includes('skill') || config.subagents.length)) {
+    throw new TaskConfigError('Extra skill roots require an exclusive task skill grant');
+  }
+  const skillRoots = [...primarySkillRoots, ...(config.extraSkillRoots ?? [])];
   const mcpPlugins = await mcpRows(config.mcpConfigPath);
   if (config.toolIds?.includes('mcp') && mcpPlugins.length === 0) {
     throw new TaskConfigError('task.tool_selection mcp requires at least one configured MCP server');
   }
   const plugins: object[] = [...mcpPlugins];
+  if (config.hostTools?.length) plugins.push(localPlugin('host-tools', {
+    url: new URL('/tools/call', config.model.baseURL).href, grant: config.model.apiKey, tools: config.hostTools,
+  }));
   // DSH 在原生 Windows 上提供 PowerShell，Linux 镜像才是本工具的交付环境。
   const hasShell = process.platform === 'linux' && (config.toolIds === undefined || config.toolIds.includes('shell'));
   const hasExplicitOffice = config.toolIds?.includes('office') === true;

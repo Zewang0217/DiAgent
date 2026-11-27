@@ -2,6 +2,7 @@
 import { readFile, stat } from 'node:fs/promises';
 import { basename, extname, isAbsolute, resolve } from 'node:path';
 import { parse } from 'yaml';
+import type { HostToolDescriptor } from '../dsh/plugins/host-tools.js';
 
 type ConfigObject = Record<string, unknown>;
 /** DSH 文件工具使用本地工作区，并受任务的路径限制。 */
@@ -39,6 +40,8 @@ export interface TaskConfig {
   skillsDir: string;
   skillNames: string[];
   toolIds?: string[];
+  hostTools?: HostToolDescriptor[];
+  extraSkillRoots?: string[];
   subagents: TaskSubagent[];
   mcpToolNames: string[];
   mcpConfigPath?: string;
@@ -54,6 +57,40 @@ export interface TaskConfig {
 
 /** 标识任务无法启动的输入错误，由命令入口映射为退出码 2。 */
 export class TaskConfigError extends Error {}
+
+/** 宿主工具只能来自受管入口，模型任务文件不能自行开放外部服务权限。 */
+function parseHostTools(value: unknown, env: NodeJS.ProcessEnv, model: TaskConfig['model']): HostToolDescriptor[] | undefined {
+  if (value == null) return undefined;
+  if (!Array.isArray(value) || value.length > 32) throw new TaskConfigError('task.host_tools must be a bounded array');
+  if (value.length === 0) return undefined;
+  const endpoint = new URL(model.baseURL);
+  if (env.DIAGENT_TASK_HOST_TOOL_BRIDGE !== 'true' || !env.DIAGENT_TASK_MODEL_REFRESH_PATH
+      || endpoint.protocol !== 'http:' || endpoint.hostname !== '127.0.0.1' || endpoint.username || endpoint.password) {
+    throw new TaskConfigError('Business tools require the managed host tool bridge');
+  }
+  const reserved = new Set(['skill', 'mcp', 'publish_event', 'office', ...taskWorkspaceTools,
+    'office_convert', 'office_render', 'office_recalculate', 'run_code', 'wait_agent', 'send_message',
+    'list_agents', 'interrupt_agent', 'spawn_agent', 'fork_agent']);
+  const names = new Set<string>();
+  return value.map((raw, index) => {
+    const field = 'task.host_tools[' + index + ']';
+    const row = object(raw, field);
+    if (Object.keys(row).some(key => !['name', 'description', 'parameters'].includes(key))) {
+      throw new TaskConfigError(field + ' contains unsupported fields');
+    }
+    const name = requiredText(row.name, field + '.name');
+    if (!/^[a-z][a-z0-9_]{0,63}$/.test(name) || reserved.has(name) || names.has(name)) {
+      throw new TaskConfigError(field + '.name must be unique and cannot shadow a native tool');
+    }
+    names.add(name);
+    const description = requiredText(row.description, field + '.description');
+    const parameters = object(row.parameters, field + '.parameters');
+    if (description.length > 4096 || parameters.type !== 'object' || JSON.stringify(parameters).length > 65536) {
+      throw new TaskConfigError(field + ' exceeds the supported tool schema limits');
+    }
+    return { name, description, parameters };
+  });
+}
 
 /** 解析 task 与 service 共用的 OpenAI 兼容模型配置。 */
 export function parseModelConfig(
@@ -233,9 +270,22 @@ export async function loadTaskConfig(env: NodeJS.ProcessEnv): Promise<TaskConfig
     models.models, modelKey, app.LLM_OPENAI_API_KEY || env.LLM_OPENAI_API_KEY || env.OPENAI_API_KEY,
   );
   const subagents = parseSubagents(task.subagents, modelKey, model.name, env);
+  const hostTools = parseHostTools(task.host_tools, env, model);
+  if (hostTools && subagents.length) throw new TaskConfigError('Host tools cannot be enabled with named subagents');
 
   const skillsDir = resolve(workspace, text(task.skills_dir, 'task.skills_dir', 'skills'));
   const skillNames = [...new Set(stringList(task.skill_names, 'task.skill_names'))];
+  const extraSkillRoots = [...new Set(stringList(task.extra_skill_roots, 'task.extra_skill_roots').map(path => resolve(workspace, path)))];
+  if (extraSkillRoots.length > 32 || (extraSkillRoots.length && (env.DIAGENT_TASK_CUSTOM_SKILLS !== 'true' || subagents.length))) {
+    throw new TaskConfigError('Extra skill roots require the managed readonly skill snapshot');
+  }
+  for (const root of extraSkillRoots) {
+    try {
+      if (!(await stat(root)).isDirectory() || !(await stat(resolve(root, 'SKILL.md'))).isFile()) throw new Error('Not a skill');
+    } catch {
+      throw new TaskConfigError('Extra skill snapshot is unavailable');
+    }
+  }
   if (skillNames.some(name => !name || name === '.' || name === '..' || /[\\/:]/.test(name))) {
     throw new TaskConfigError('task.skill_names must contain directory names');
   }
@@ -248,7 +298,8 @@ export async function loadTaskConfig(env: NodeJS.ProcessEnv): Promise<TaskConfig
       throw new TaskConfigError('task.tool_selection requires tool_ids and does not accept tool_config');
     }
     toolIds = [...new Set(stringList(selection.tool_ids, 'task.tool_selection.tool_ids'))];
-    if (toolIds.some(id => !['skill', 'mcp', 'publish_event', 'office', ...taskWorkspaceTools].includes(id))) {
+    if (toolIds.some(id => !['skill', 'mcp', 'publish_event', 'office', ...taskWorkspaceTools,
+      ...(hostTools ?? []).map(tool => tool.name)].includes(id))) {
       throw new TaskConfigError('task.tool_selection contains an unsupported tool');
     }
     if (toolIds.includes('office')) {
@@ -260,12 +311,18 @@ export async function loadTaskConfig(env: NodeJS.ProcessEnv): Promise<TaskConfig
     if (toolIds.some(id => taskWorkspaceTools.includes(id)) && !env.DIAGENT_TASK_MODEL_REFRESH_PATH) {
       throw new TaskConfigError('Shell and file tools require the managed task model bridge');
     }
-    if (toolIds.includes('skill') && skillNames.length === 0) {
+    if (toolIds.includes('skill') && skillNames.length === 0 && extraSkillRoots.length === 0) {
       throw new TaskConfigError('task.tool_selection skill requires task.skill_names');
     }
     if (toolIds.includes('publish_event') && diosEvents === 'false') {
       throw new TaskConfigError('task.tool_selection publish_event is disabled by deployment');
     }
+  }
+  if (hostTools?.some(tool => !toolIds?.includes(tool.name))) {
+    throw new TaskConfigError('Host tools require an explicit matching task.tool_selection');
+  }
+  if (extraSkillRoots.length && !toolIds?.includes('skill')) {
+    throw new TaskConfigError('Extra skill roots require an explicit skill tool grant');
   }
   const taskMcpPath = text(task.mcp_config_path, 'task.mcp_config_path');
   const defaultMcpPath = text(app.MCP_CONFIG_PATH ?? env.MCP_CONFIG_PATH, 'MCP_CONFIG_PATH');
@@ -311,6 +368,8 @@ export async function loadTaskConfig(env: NodeJS.ProcessEnv): Promise<TaskConfig
     skillsDir,
     skillNames,
     toolIds,
+    hostTools,
+    extraSkillRoots,
     subagents,
     mcpToolNames: selectedTools,
     mcpConfigPath,

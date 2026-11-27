@@ -19,6 +19,7 @@ interface BridgeOptions {
   model: TaskConfig['model'];
   localKey: string;
   credentialFile: string;
+  hostToolsEnabled: boolean;
 }
 
 class RefreshRejected extends Error {
@@ -26,9 +27,15 @@ class RefreshRejected extends Error {
 }
 
 /** 迁移一次性引导文件并启动代理。DSH 启动前，代理会清除该文件。 */
-export async function openTaskModelBridge(model: TaskConfig['model'], source: string, signal: AbortSignal) {
+export async function openTaskModelBridge(model: TaskConfig['model'], source: string, signal: AbortSignal, hostToolsEnabled = false) {
   if (process.platform !== 'linux' || process.getuid?.() !== 0) {
     throw new Error('Task model refresh requires the Linux task image');
+  }
+  if (hostToolsEnabled) {
+    const endpoint = new URL(model.baseURL);
+    if (endpoint.protocol !== 'http:' || endpoint.hostname !== '127.0.0.1' || endpoint.username || endpoint.password) {
+      throw new Error('Host tools require the managed local task proxy');
+    }
   }
   const directory = await mkdtemp('/tmp/diagent-model-');
   const credentialFile = join(directory, 'refresh.json');
@@ -46,7 +53,7 @@ export async function openTaskModelBridge(model: TaskConfig['model'], source: st
     const ready = AbortSignal.any([signal, AbortSignal.timeout(10_000)]);
     try {
       const address = once(child, 'message', { signal: ready });
-      child.send({ model, localKey, credentialFile } satisfies BridgeOptions);
+      child.send({ model, localKey, credentialFile, hostToolsEnabled } satisfies BridgeOptions);
       const [port] = await Promise.race([address, once(child, 'exit', { signal: ready }).then(() => [])]);
       if (typeof port !== 'number') throw new Error('Model bridge failed to start');
       await rm(directory, { recursive: true, force: true });
@@ -65,7 +72,7 @@ export async function openTaskModelBridge(model: TaskConfig['model'], source: st
   }
 }
 
-async function serveBridge({ model, localKey, credentialFile }: BridgeOptions): Promise<void> {
+async function serveBridge({ model, localKey, credentialFile, hostToolsEnabled }: BridgeOptions): Promise<void> {
   const { refresh_token: refreshToken } = JSON.parse(await readFile(credentialFile, 'utf8'));
   await unlink(credentialFile);
   if (typeof refreshToken !== 'string' || !/^[\w-]{43}$/.test(refreshToken)) throw new Error('Invalid refresh credential');
@@ -88,7 +95,8 @@ async function serveBridge({ model, localKey, credentialFile }: BridgeOptions): 
   }
 
   const server = createServer(async (request, response) => {
-    if (request.method !== 'POST' || request.url !== '/v1/chat/completions' || request.headers.authorization !== `Bearer ${localKey}`) {
+    const hostCall = hostToolsEnabled && request.url === '/tools/call';
+    if (request.method !== 'POST' || (!hostCall && request.url !== '/v1/chat/completions') || request.headers.authorization !== `Bearer ${localKey}`) {
       response.writeHead(404).end();
       return;
     }
@@ -99,18 +107,19 @@ async function serveBridge({ model, localKey, credentialFile }: BridgeOptions): 
       let size = 0;
       for await (const chunk of request) {
         size += chunk.length;
-        if (size > requestLimit) { response.writeHead(413).end(); return; }
+        if (size > (hostCall ? 256 * 1024 : requestLimit)) { response.writeHead(413).end(); return; }
         chunks.push(chunk);
       }
       const body = Buffer.concat(chunks);
-      const infer = (token: string) => fetch(base + '/chat/completions', {
+      const endpoint = hostCall ? new URL('/tools/call', base).href : base + '/chat/completions';
+      const infer = (token: string) => fetch(endpoint, {
         method: 'POST', body, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         redirect: 'error', signal: controller.signal,
       });
       const sent = accessToken;
       let upstream = await infer(sent);
       // DiOS 的 401 出现在转发前。只重发这一次推理，流式响应和工具不会被重放。
-      if (upstream.status === 401) {
+      if (!hostCall && upstream.status === 401) {
         await upstream.body?.cancel();
         if (sent === accessToken) {
           refreshing ??= refreshAccess().finally(() => { refreshing = undefined; });

@@ -12,6 +12,12 @@ DiAgent 在 Docker 容器中运行智能体任务。本分支使用 TypeScript �
 
 本地工具任务可以同时设置 `DIAGENT_TASK_PAUSE_ON_LIMIT=true`。达到步数上限时，Task 在下一次模型请求前停止并返回 `paused` 和 `checkpoint_ref`。调度器须保留同一协议目录及任务工作区，并确保两段不会并发执行。批准后使用原镜像和模型，在相同目录下带 `DIAGENT_TASK_RESUME_SESSION` 启动下一段。该机制从已保存的对话和工具结果继续处理，外部进程不属于检查点范围。
 
+受管任务可显式设置 `DIAGENT_TASK_HOST_TOOL_BRIDGE=true`，通过 `task.host_tools` 声明具名业务工具的 `name`、`description` 和原始参数 JSON Schema `parameters`，并在 `task.tool_selection.tool_ids` 中逐项批准。该入口要求受管模型刷新路径和回环地址的任务代理。原生插件通过代理的 `POST /tools/call` 转发真实 `call_id`、`tool`、`arguments`，传递取消信号，不自动重试业务调用。模型及外部服务凭据由隔离代理或宿主保管，不写入工具 schema。
+
+开启宿主工具检查点意味着调用调度器负责持久收据和外部副作用核对：同一调用恢复使用原结果，未知完成状态不能自动重提，发布或保存安全暂停前须停止所有未结算调用。SDK 不替宿主完成此事务判断，普通 MCP、事件提交和具名子 Agent 仍不允许使用该检查点路径。
+
+宿主固化的只读技能快照可通过 `task.extra_skill_roots` 增补当前镜像的已选技能根，须同时设置 `DIAGENT_TASK_CUSTOM_SKILLS=true` 并显式批准 `skill`，不能与具名子 Agent 共用。宿主须按 profile 白名单固化包，校验 frontmatter 名称与授权目录一致，使用小写 kebab-case，拒绝与内置技能重名，并在恢复时核对原内容与安全权限。额外根须只读挂载；任务文件不能自行开放新的宿主目录。
+
 
 ## TypeScript / DSH 常驻服务试点
 

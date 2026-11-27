@@ -28,6 +28,9 @@ export class TaskResultProtocol {
     const resume = env.DIAGENT_TASK_RESUME_SESSION;
     const canPause = env.DIAGENT_TASK_PAUSE_ON_LIMIT === 'true';
     const localTools = new Set(['shell', 'read', 'write', 'edit', 'skill', 'office']);
+    if (env.DIAGENT_TASK_HOST_TOOL_BRIDGE === 'true' && env.DIAGENT_TASK_MODEL_REFRESH_PATH) {
+      config.hostTools?.forEach(tool => localTools.add(tool.name));
+    }
     if (!directory && !resume && !canPause) return undefined;
     if (!directory || !isAbsolute(directory)) {
       throw new TaskConfigError('Task protocol directory must be an absolute path');

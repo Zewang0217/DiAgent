@@ -41,7 +41,7 @@ export async function runDshTask(
   onTaskEvent?: (event: SessionEvent) => Promise<void>,
 ): Promise<string> {
   const credentialFile = process.env.DIAGENT_TASK_MODEL_REFRESH_PATH;
-  await using bridge = credentialFile ? await openTaskModelBridge(config.model, credentialFile, signal) : undefined;
+  await using bridge = credentialFile ? await openTaskModelBridge(config.model, credentialFile, signal, Boolean(config.hostTools?.length)) : undefined;
   const execution = bridge ? { ...config, model: bridge.model } : config;
   const writesWorkspace = config.toolIds === undefined || config.toolIds.some(id => ['shell', 'write', 'edit'].includes(id))
     || config.subagents.some(role => role.toolIds.some(id => ['write', 'edit'].includes(id)));
