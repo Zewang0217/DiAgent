@@ -33,14 +33,14 @@ chatecnu/diagent-office:verify-t5
 1. 仍使用 `TASK_CONFIG` 和 `DIAGENT_TASK_MODEL_REFRESH_PATH`：不需要改。
 2. 解析 `result.json`：允许 `version: 1|2`，优先 `error_code`。
 3. 构建原生 Office 任务镜像：使用 `office-task` 目标，不要在产品仓库里直接改 `node_modules`。
-4. 自定义镜像标签：声明 `org.hqit.diagent.model-socket=1` 才会走新 UDS 路径；未声明时继续旧入口。
+4. 自定义镜像标签：当前 ChatECNU 网关要求 `org.hqit.diagent.model-socket=1`；其他宿主仍可使用自己的 refresh/run.mjs 模式。
 5. 自定义技能：继续走 `DIAGENT_TASK_CUSTOM_SKILLS=true` + `task.extra_skill_roots`，无变化。
 
 ## 回滚
 
 - 运行时回滚点：`3440411`（schema/事件改动前）或 `b761f8e`（本轮改动前）。
 - 镜像回滚点：保留切换前本地镜像 tag 即可；本轮没有推送远端。
-- 网关侧回滚：父仓库子模块指回旧 commit，并保留旧 `run.mjs + model-refresh.json` 兼容分支。
+- 网关侧回滚：父仓库子模块指回旧 commit，即可恢复旧 `run.mjs + model-refresh.json` 兼容分支。
 
 ## 不在本文范围
 
