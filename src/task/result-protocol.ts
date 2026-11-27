@@ -7,6 +7,7 @@ import type { PersistentDshTurn } from '../dsh/task-runtime.js';
 import { TaskConfigError, type TaskConfig } from './config.js';
 
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
+const toolCallId = /^[\w.:-]{1,128}$/;
 
 type TaskStatus = 'completed' | 'failed' | 'paused';
 
@@ -73,9 +74,14 @@ export class TaskResultProtocol {
         const name = /"name"\s*:\s*"(office-(?:docx|xlsx|pptx))"/.exec(event.data.arguments)?.[1];
         skill = name;
       }
-      await this.writeEvent('tool_started', { tool, skill });
+      await this.writeEvent('tool_started', {
+        tool, skill, call_id: toolCallId.test(event.data.callId) ? event.data.callId : undefined,
+      });
     } else if (event.type === 'tool/result') {
-      await this.writeEvent('tool_finished', { success: !event.data.message.isError });
+      const id = event.data.message.toolCallId;
+      await this.writeEvent('tool_finished', {
+        success: !event.data.message.isError, call_id: toolCallId.test(id) ? id : undefined,
+      });
     }
   }
 
