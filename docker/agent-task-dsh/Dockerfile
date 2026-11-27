@@ -34,6 +34,7 @@ ENV PATH="/opt/diagent-office/bin:${PATH}"
 RUN mkdir -p -m 0700 /run/diagent
 LABEL org.hqit.diagent.task-tool-selection="1"
 LABEL org.hqit.diagent.task-model-refresh="1"
+LABEL org.hqit.diagent.model-socket="1"
 LABEL org.hqit.diagent.task-subagents="1"
 LABEL org.hqit.diagent.task-subagent-resources="1"
 ENTRYPOINT ["node", "--disable-sigusr1", "dist/task/main.js"]

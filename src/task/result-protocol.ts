@@ -28,7 +28,8 @@ export class TaskResultProtocol {
     const resume = env.DIAGENT_TASK_RESUME_SESSION;
     const canPause = env.DIAGENT_TASK_PAUSE_ON_LIMIT === 'true';
     const localTools = new Set(['shell', 'read', 'write', 'edit', 'skill', 'office']);
-    if (env.DIAGENT_TASK_HOST_TOOL_BRIDGE === 'true' && env.DIAGENT_TASK_MODEL_REFRESH_PATH) {
+    if (env.DIAGENT_TASK_HOST_TOOL_BRIDGE === 'true'
+        && (config.managedModelSocket || config.managedModelRefresh)) {
       config.hostTools?.forEach(tool => localTools.add(tool.name));
     }
     if (!directory && !resume && !canPause) return undefined;

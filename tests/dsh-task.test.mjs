@@ -76,6 +76,55 @@ test('the managed model bridge forwards a large image request only for an image 
   assert.deepEqual(statuses, [413, 200]);
 });
 
+test('a managed model socket forwards inference and host tools without a refresh file', {
+  skip: process.platform !== 'linux' || process.getuid?.() !== 0,
+}, async () => {
+  await using area = await mkdtempDisposable('/tmp/diagent-uds-');
+  const socketPath = join(area.path, 'model.sock');
+  const requests = [];
+  const upstream = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    requests.push({
+      path: request.url,
+      authorization: request.headers.authorization,
+      body: JSON.parse(Buffer.concat(chunks).toString()),
+    });
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(request.url === '/tools/call'
+      ? JSON.stringify({ result: 'host-ok' })
+      : JSON.stringify({ choices: [] }));
+  });
+  upstream.listen(socketPath);
+  await once(upstream, 'listening');
+  try {
+    const signal = AbortSignal.timeout(15_000);
+    await using bridge = await openTaskModelBridge({
+      name: 'fixture-model', baseURL: 'http://127.0.0.1/v1', apiKey: 'fixture',
+    }, { socketPath }, signal, true);
+    const headers = { Authorization: `Bearer ${bridge.model.apiKey}`, 'Content-Type': 'application/json' };
+
+    const inference = await fetch(bridge.model.baseURL + '/chat/completions', {
+      method: 'POST', headers, body: JSON.stringify({ model: 'fixture-model', stream: true, messages: [] }), signal,
+    });
+    assert.equal(inference.status, 200);
+    await inference.body?.cancel();
+
+    const hostCall = { call_id: 'socket-call', tool: 'image_generator', arguments: { prompt: 'school' } };
+    const tool = await fetch(new URL('/tools/call', bridge.model.baseURL), {
+      method: 'POST', headers, body: JSON.stringify(hostCall), signal,
+    });
+    assert.equal(tool.status, 200);
+    assert.deepEqual(await tool.json(), { result: 'host-ok' });
+
+    assert.deepEqual(requests.map(request => request.path), ['/v1/chat/completions', '/tools/call']);
+    assert.deepEqual(requests.map(request => request.authorization), ['Bearer fixture', 'Bearer fixture']);
+    assert.deepEqual(requests[1].body, hostCall);
+  } finally {
+    await new Promise(resolve => upstream.close(resolve));
+  }
+});
+
 test('an explicit task tool selection keeps the bundled Office skills and tools closed', async () => {
   const rows = await officeProfileRows({ toolIds: ['skill'] });
   const disabled = rows.filter(row => row.disabled).map(row => row.id);
@@ -90,7 +139,7 @@ test('a task with named subagents does not register globally visible Office skil
   assert.equal(rows.find(row => row.id === 'skill-office').disabled, true);
 });
 
-async function officeTaskConfig({ subagents, managed = true } = {}) {
+async function officeTaskConfig({ subagents, managed = true, socket = '' } = {}) {
   const cacheDir = join(project, '.cache');
   await mkdir(cacheDir, { recursive: true });
   await using workspace = await mkdtempDisposable(join(cacheDir, 'diagent-office-config-'));
@@ -104,6 +153,7 @@ async function officeTaskConfig({ subagents, managed = true } = {}) {
   }));
   return await loadTaskConfig({
     TASK_CONFIG: path, DIAGENT_TASK_MODEL_REFRESH_PATH: managed ? join(workspace.path, 'refresh.json') : '',
+    DIAGENT_TASK_MODEL_SOCKET: socket,
   });
 }
 
@@ -120,6 +170,14 @@ test('the explicit Office grant loads bundled tools without loading custom Skill
 
 test('the explicit Office grant requires the managed task model bridge', async () => {
   await assert.rejects(officeTaskConfig({ managed: false }), /Office tools require the managed task model bridge/);
+});
+
+test('a managed model socket enables Office tools without a refresh file', async () => {
+  const config = await officeTaskConfig({ managed: false, socket: join(project, '.cache', 'fixture-model.sock') });
+
+  assert.equal(config.managedModelSocket, join(project, '.cache', 'fixture-model.sock'));
+  assert.equal(config.managedModelRefresh, undefined);
+  assert.deepEqual(config.toolIds, ['office']);
 });
 
 test('the explicit Office grant rejects roles that would share the bundled Skill provider', async () => {

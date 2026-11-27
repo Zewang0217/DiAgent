@@ -46,6 +46,30 @@ test('only the managed host bridge can enable checkpointed business tools', asyn
   assert.ok(protocol.checkpoint);
 });
 
+test('a managed model socket enables host tools without a refresh file', async context => {
+  const { env } = await taskFixture(context);
+  const config = await loadTaskConfig({
+    ...env, DIAGENT_TASK_MODEL_REFRESH_PATH: '',
+    DIAGENT_TASK_MODEL_SOCKET: join(process.cwd(), '.cache', 'host-task.sock'),
+  });
+
+  assert.deepEqual(config.hostTools.map(tool => tool.name), ['image_generator']);
+  assert.equal(config.managedModelRefresh, undefined);
+  assert.equal(config.managedModelSocket, join(process.cwd(), '.cache', 'host-task.sock'));
+});
+
+test('checkpointed host tools accept a managed model socket', async context => {
+  const { env } = await taskFixture(context);
+  const socketEnv = {
+    ...env, DIAGENT_TASK_MODEL_REFRESH_PATH: '',
+    DIAGENT_TASK_MODEL_SOCKET: join(process.cwd(), '.cache', 'host-checkpoint.sock'),
+  };
+  const config = await loadTaskConfig(socketEnv);
+  const protocol = await TaskResultProtocol.open(socketEnv, config);
+
+  assert.ok(protocol?.checkpoint);
+});
+
 test('task config cannot self-authorize a host bridge', async context => {
   const { env } = await taskFixture(context);
 

@@ -46,6 +46,9 @@ export interface TaskConfig {
   mcpToolNames: string[];
   mcpConfigPath?: string;
   isDiosEventPublishingEnabled: boolean;
+  /** 宿主受管模型通道；socket 与 refresh 均未设置时直接使用 model.baseURL。 */
+  managedModelSocket?: string;
+  managedModelRefresh?: string;
   model: {
     name: string;
     baseURL: string;
@@ -59,14 +62,22 @@ export interface TaskConfig {
 export class TaskConfigError extends Error {}
 
 /** 宿主工具只能来自受管入口，模型任务文件不能自行开放外部服务权限。 */
-function parseHostTools(value: unknown, env: NodeJS.ProcessEnv, model: TaskConfig['model']): HostToolDescriptor[] | undefined {
+function parseHostTools(
+  value: unknown, env: NodeJS.ProcessEnv, model: TaskConfig['model'],
+  managedModel: boolean, modelSocket: string | undefined,
+): HostToolDescriptor[] | undefined {
   if (value == null) return undefined;
   if (!Array.isArray(value) || value.length > 32) throw new TaskConfigError('task.host_tools must be a bounded array');
   if (value.length === 0) return undefined;
-  const endpoint = new URL(model.baseURL);
-  if (env.DIAGENT_TASK_HOST_TOOL_BRIDGE !== 'true' || !env.DIAGENT_TASK_MODEL_REFRESH_PATH
-      || endpoint.protocol !== 'http:' || endpoint.hostname !== '127.0.0.1' || endpoint.username || endpoint.password) {
+  if (env.DIAGENT_TASK_HOST_TOOL_BRIDGE !== 'true' || !managedModel) {
     throw new TaskConfigError('Business tools require the managed host tool bridge');
+  }
+  // 只有 HTTP 上游需要在此校验；Unix socket 由 DiAgent 的本地转发提供受管端点。
+  if (!modelSocket) {
+    const endpoint = new URL(model.baseURL);
+    if (endpoint.protocol !== 'http:' || endpoint.hostname !== '127.0.0.1' || endpoint.username || endpoint.password) {
+      throw new TaskConfigError('Business tools require the managed host tool bridge');
+    }
   }
   const reserved = new Set(['skill', 'mcp', 'publish_event', 'office', ...taskWorkspaceTools,
     'office_convert', 'office_render', 'office_recalculate', 'run_code', 'wait_agent', 'send_message',
@@ -158,7 +169,9 @@ function stringList(value: unknown, field: string): string[] {
   return value;
 }
 
-function parseSubagents(value: unknown, modelKey: string, modelName: string, env: NodeJS.ProcessEnv): TaskSubagent[] {
+function parseSubagents(
+  value: unknown, modelKey: string, modelName: string, env: NodeJS.ProcessEnv, managedModel: boolean,
+): TaskSubagent[] {
   if (value == null) return [];
   if (!Array.isArray(value)) throw new TaskConfigError('task.subagents must be a list of objects');
   const names = new Set<string>();
@@ -188,7 +201,7 @@ function parseSubagents(value: unknown, modelKey: string, modelName: string, env
     if (toolIds.some(id => !['skill', 'mcp', ...taskFileTools].includes(id))) {
       throw new TaskConfigError(field + '.tool_selection can only select skill, mcp, read, write, or edit');
     }
-    if (toolIds.some(id => taskFileTools.includes(id)) && !env.DIAGENT_TASK_MODEL_REFRESH_PATH) {
+    if (toolIds.some(id => taskFileTools.includes(id)) && !managedModel) {
       throw new TaskConfigError('Subagent file tools require the managed task model bridge');
     }
     const skillNames = [...new Set(stringList(role.skill_names, field + '.skill_names'))];
@@ -269,8 +282,14 @@ export async function loadTaskConfig(env: NodeJS.ProcessEnv): Promise<TaskConfig
   const model = parseModelConfig(
     models.models, modelKey, app.LLM_OPENAI_API_KEY || env.LLM_OPENAI_API_KEY || env.OPENAI_API_KEY,
   );
-  const subagents = parseSubagents(task.subagents, modelKey, model.name, env);
-  const hostTools = parseHostTools(task.host_tools, env, model);
+  const managedModelSocket = text(env.DIAGENT_TASK_MODEL_SOCKET, 'DIAGENT_TASK_MODEL_SOCKET') || undefined;
+  const managedModelRefresh = text(env.DIAGENT_TASK_MODEL_REFRESH_PATH, 'DIAGENT_TASK_MODEL_REFRESH_PATH') || undefined;
+  if (managedModelSocket && (!isAbsolute(managedModelSocket) || managedModelSocket.includes('\0'))) {
+    throw new TaskConfigError('DIAGENT_TASK_MODEL_SOCKET must be an absolute path');
+  }
+  const managedModel = Boolean(managedModelSocket || managedModelRefresh);
+  const subagents = parseSubagents(task.subagents, modelKey, model.name, env, managedModel);
+  const hostTools = parseHostTools(task.host_tools, env, model, managedModel, managedModelSocket);
   if (hostTools && subagents.length) throw new TaskConfigError('Host tools cannot be enabled with named subagents');
 
   const skillsDir = resolve(workspace, text(task.skills_dir, 'task.skills_dir', 'skills'));
@@ -304,11 +323,11 @@ export async function loadTaskConfig(env: NodeJS.ProcessEnv): Promise<TaskConfig
     }
     if (toolIds.includes('office')) {
       if (subagents.length > 0) throw new TaskConfigError('Office tools cannot be enabled with named subagents');
-      if (!env.DIAGENT_TASK_MODEL_REFRESH_PATH) {
+      if (!managedModel) {
         throw new TaskConfigError('Office tools require the managed task model bridge');
       }
     }
-    if (toolIds.some(id => taskWorkspaceTools.includes(id)) && !env.DIAGENT_TASK_MODEL_REFRESH_PATH) {
+    if (toolIds.some(id => taskWorkspaceTools.includes(id)) && !managedModel) {
       throw new TaskConfigError('Shell and file tools require the managed task model bridge');
     }
     if (toolIds.includes('skill') && skillNames.length === 0 && extraSkillRoots.length === 0) {
@@ -374,6 +393,8 @@ export async function loadTaskConfig(env: NodeJS.ProcessEnv): Promise<TaskConfig
     mcpToolNames: selectedTools,
     mcpConfigPath,
     isDiosEventPublishingEnabled: diosEvents === 'true' && (toolIds === undefined || toolIds.includes('publish_event')),
+    managedModelSocket,
+    managedModelRefresh,
     model,
   };
 }

@@ -12,7 +12,7 @@ DiAgent 在 Docker 容器中运行智能体任务。本分支使用 TypeScript �
 
 本地工具任务可以同时设置 `DIAGENT_TASK_PAUSE_ON_LIMIT=true`。达到步数上限时，Task 在下一次模型请求前停止并返回 `paused` 和 `checkpoint_ref`。调度器须保留同一协议目录及任务工作区，并确保两段不会并发执行。批准后使用原镜像和模型，在相同目录下带 `DIAGENT_TASK_RESUME_SESSION` 启动下一段。该机制从已保存的对话和工具结果继续处理，外部进程不属于检查点范围。
 
-受管任务可显式设置 `DIAGENT_TASK_HOST_TOOL_BRIDGE=true`，通过 `task.host_tools` 声明具名业务工具的 `name`、`description` 和原始参数 JSON Schema `parameters`，并在 `task.tool_selection.tool_ids` 中逐项批准。该入口要求受管模型刷新路径和回环地址的任务代理。原生插件通过代理的 `POST /tools/call` 转发真实 `call_id`、`tool`、`arguments`，传递取消信号，不自动重试业务调用。模型及外部服务凭据由隔离代理或宿主保管，不写入工具 schema。
+受管任务可显式设置 `DIAGENT_TASK_HOST_TOOL_BRIDGE=true`，通过 `task.host_tools` 声明具名业务工具的 `name`、`description` 和原始参数 JSON Schema `parameters`，并在 `task.tool_selection.tool_ids` 中逐项批准。该入口要求受管模型入口（Unix socket 或刷新路径）和回环地址的任务代理。原生插件通过代理的 `POST /tools/call` 转发真实 `call_id`、`tool`、`arguments`，传递取消信号，不自动重试业务调用。模型及外部服务凭据由隔离代理或宿主保管，不写入工具 schema。
 
 开启宿主工具检查点意味着调用调度器负责持久收据和外部副作用核对：同一调用恢复使用原结果，未知完成状态不能自动重提，发布或保存安全暂停前须停止所有未结算调用。SDK 不替宿主完成此事务判断，普通 MCP、事件提交和具名子 Agent 仍不允许使用该检查点路径。
 
@@ -119,11 +119,11 @@ npm run test:task
 
 对支持图片输入的模型，在 `models.models.<模型别名>` 设置 `"input_modalities": ["text", "image"]`。省略该字段时，DSH 按原有规则解析模型输入能力。
 
-显式 Office 授权要求 Linux task 镜像和 `DIAGENT_TASK_MODEL_REFRESH_PATH` 指向的受管模型授权文件，适用于一次性 CLI 入口。独立任务 HTTP 控制器缺少受管模型代理，提交显式 `office` profile 时会返回配置错误。Office 工具的输入限于任务工作区，转换和重算的临时文件可经单独授权的 `shell` 复制到工作区。Linux task 镜像提供中西文字体及 `python-docx`、`python-pptx` 和 `openpyxl`。自定义 Skills 需要单独选择 `skill` 并填写 `task.skill_names`。配置具名子 Agent 时，共用的 Office Skills 提供器关闭，任务启动会拒绝显式 `office` 授权。Office 文件写入任务工作区，DiOS 当前登记 Markdown 结果。
+显式 Office 授权要求 Linux task 镜像和受管模型入口：`DIAGENT_TASK_MODEL_SOCKET` 指向宿主 Unix socket，或 `DIAGENT_TASK_MODEL_REFRESH_PATH` 指向受管模型授权文件，适用于一次性 CLI 入口。独立任务 HTTP 控制器缺少受管模型代理，提交显式 `office` profile 时会返回配置错误。Office 工具的输入限于任务工作区，转换和重算的临时文件可经单独授权的 `shell` 复制到工作区。Linux task 镜像提供中西文字体及 `python-docx`、`python-pptx` 和 `openpyxl`。自定义 Skills 需要单独选择 `skill` 并填写 `task.skill_names`。配置具名子 Agent 时，共用的 Office Skills 提供器关闭，任务启动会拒绝显式 `office` 授权。Office 文件写入任务工作区，DiOS 当前登记 Markdown 结果。
 
-开启 DiOS 的任务模型代理和刷新后，可显式授予 `shell`、`read`、`write` 和 `edit`。原生文件工具检查任务工作区路径，写入及 Shell 由 DSH 使用工作区写入策略执行。Shell 可读取和修改沙箱允许的文件。刷新凭据由独立 UID 的本地进程读取，引导文件在 DSH 启动前销毁。此模式使用带 `org.hqit.diagent.task-model-refresh=1` 的 Linux 镜像和默认非特权 Docker 配置。
+开启 DiOS 的任务模型代理（Unix socket 或刷新路径）后，可显式授予 `shell`、`read`、`write` 和 `edit`。原生文件工具检查任务工作区路径，写入及 Shell 由 DSH 使用工作区写入策略执行。Shell 可读取和修改沙箱允许的文件。刷新凭据由独立 UID 的本地进程读取，引导文件在 DSH 启动前销毁。此模式使用带 `org.hqit.diagent.task-model-refresh=1` 的 Linux 镜像和默认非特权 Docker 配置。
 
-`task.subagents` 可配置具名子 Agent。每项填写唯一的 `name`、供主 Agent 选择时参考的 `description`、子 Agent 的 `prompt` 和 `tool_selection.tool_ids`。空工具名单只启用子 Agent 的文本推理。选择 `read`、`write` 或 `edit` 时需开启任务模型代理和刷新。
+`task.subagents` 可配置具名子 Agent。每项填写唯一的 `name`、供主 Agent 选择时参考的 `description`、子 Agent 的 `prompt` 和 `tool_selection.tool_ids`。空工具名单只启用子 Agent 的文本推理。选择 `read`、`write` 或 `edit` 时需开启受管模型入口（Unix socket 或刷新路径）。
 
 ```json
 {
@@ -380,6 +380,11 @@ MCP（Model Context Protocol）服务器配置文件，用于连接外部工具�
 | `TRIGGER_MODE` | 否 | 配置中的 `trigger.mode` | 触发模式覆盖 |
 | `CRON` | 否 | 配置中的 `trigger.cron` | Cron 表达式覆盖 |
 | `INTERVAL_SECONDS` | 否 | 配置中的 `trigger.interval_seconds` | 间隔秒数覆盖 |
+| `DIAGENT_TASK_MODEL_SOCKET` | 否 | - | 宿主提供的受管模型 Unix socket；设置后无需 refresh 文件即可启用 shell/文件/宿主工具 |
+| `DIAGENT_TASK_MODEL_REFRESH_PATH` | 否 | - | 受管模型刷新凭据文件；可与 socket 同时使用 |
+| `DIAGENT_TASK_PROTOCOL_DIR` | 否 | - | 写入 `events.ndjson`、`result.json` 和检查点的控制目录 |
+| `DIAGENT_TASK_HOST_TOOL_BRIDGE` | 否 | `false` | 允许 `task.host_tools` 受管宿主工具入口 |
+| `DIAGENT_TASK_CUSTOM_SKILLS` | 否 | `false` | 允许 `task.extra_skill_roots` 只读技能快照 |
 
 ### 使用 docker run
 

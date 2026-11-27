@@ -1,9 +1,10 @@
 /** 在独立 Linux UID 下代理任务推理，刷新凭据只由代理进程读取。 */
-import { fork } from 'node:child_process';
+import { fork, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { chmod, chown, copyFile, mkdtemp, readFile, rm, unlink } from 'node:fs/promises';
-import { createServer } from 'node:http';
+import { createServer as createHttpServer } from 'node:http';
+import { createConnection, createServer as createNetServer, type Server as NetServer, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -15,10 +16,17 @@ const brokerUid = 65534;
 const textRequestLimit = 1024 * 1024;
 // DSH 发送 Base64 图像时，需要为原始图片预算和消息结构预留空间。
 const imageRequestLimit = 32 * textRequestLimit;
+
+/** 宿主提供的受管模型入口；socket 与 refresh 至少设置一个。 */
+export interface TaskModelBridgeOptions {
+  socketPath?: string;
+  refreshFile?: string;
+}
+
 interface BridgeOptions {
   model: TaskConfig['model'];
   localKey: string;
-  credentialFile: string;
+  credentialFile?: string;
   hostToolsEnabled: boolean;
 }
 
@@ -26,62 +34,123 @@ class RefreshRejected extends Error {
   constructor(readonly status: number) { super('Task model authorization could not be refreshed'); }
 }
 
-/** 迁移一次性引导文件并启动代理。DSH 启动前，代理会清除该文件。 */
-export async function openTaskModelBridge(model: TaskConfig['model'], source: string, signal: AbortSignal, hostToolsEnabled = false) {
+/** 把宿主 Unix socket 暴露为 broker 子进程可访问的本地 HTTP 端口。 */
+function socketRelay(socketPath: string, sockets: Set<Socket>) {
+  return createNetServer(client => {
+    sockets.add(client);
+    client.once('close', () => sockets.delete(client));
+    const upstream = createConnection(socketPath);
+    client.on('error', () => upstream.destroy());
+    upstream.on('error', () => client.destroy());
+    client.on('close', () => upstream.destroy());
+    upstream.on('close', () => client.destroy());
+    client.pipe(upstream).pipe(client);
+  });
+}
+
+/**
+ * 迁移一次性引导文件并启动代理。DSH 启动前，代理会清除该文件。
+ * Unix socket 由父进程以 root 转发到 broker 子进程的本地端口，保持子进程 UID 不变。
+ */
+export async function openTaskModelBridge(
+  model: TaskConfig['model'],
+  source: TaskModelBridgeOptions | string,
+  signal: AbortSignal,
+  hostToolsEnabled = false,
+) {
+  const options = typeof source === 'string' ? { refreshFile: source } : source;
+  const socketPath = options.socketPath;
+  const refreshFile = options.refreshFile;
   if (process.platform !== 'linux' || process.getuid?.() !== 0) {
-    throw new Error('Task model refresh requires the Linux task image');
+    throw new Error('Task model bridge requires the Linux task image');
   }
-  if (hostToolsEnabled) {
+  if (!socketPath && !refreshFile) {
+    throw new Error('Task model bridge requires a Unix socket or a refresh file');
+  }
+  if (hostToolsEnabled && !socketPath) {
     const endpoint = new URL(model.baseURL);
     if (endpoint.protocol !== 'http:' || endpoint.hostname !== '127.0.0.1' || endpoint.username || endpoint.password) {
       throw new Error('Host tools require the managed local task proxy');
     }
   }
-  const directory = await mkdtemp('/tmp/diagent-model-');
-  const credentialFile = join(directory, 'refresh.json');
+
+  let directory: string | undefined;
+  let credentialFile: string | undefined;
+  let relay: NetServer | undefined;
+  const sockets = new Set<Socket>();
+  let child: ChildProcess | undefined;
   try {
-    await copyFile(source, credentialFile);
-    await chmod(credentialFile, 0o400);
-    await chown(credentialFile, brokerUid, brokerUid);
-    await chown(directory, brokerUid, brokerUid);
-    await unlink(source);
+    if (refreshFile) {
+      directory = await mkdtemp('/tmp/diagent-model-');
+      credentialFile = join(directory, 'refresh.json');
+      await copyFile(refreshFile, credentialFile);
+      await chmod(credentialFile, 0o400);
+      await chown(credentialFile, brokerUid, brokerUid);
+      await chown(directory, brokerUid, brokerUid);
+      await unlink(refreshFile);
+    }
+
+    let upstreamBaseURL = model.baseURL;
+    if (socketPath) {
+      relay = socketRelay(socketPath, sockets);
+      relay.listen(0, '127.0.0.1');
+      await once(relay, 'listening');
+      const address = relay.address();
+      if (!address || typeof address !== 'object') throw new Error('Model socket relay failed to start');
+      // broker 仍按 OpenAI 兼容路径拼接 /chat/completions，宿主 socket 提供 /v1 与 /tools。
+      upstreamBaseURL = `http://127.0.0.1:${address.port}/v1`;
+    }
+
     const localKey = randomUUID();
-    const child = fork(fileURLToPath(import.meta.url), ['serve'], {
+    child = fork(fileURLToPath(import.meta.url), ['serve'], {
       uid: brokerUid, gid: brokerUid, env: {}, execArgv: ['--disable-sigusr1'],
       stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
     });
     const ready = AbortSignal.any([signal, AbortSignal.timeout(10_000)]);
-    try {
-      const address = once(child, 'message', { signal: ready });
-      child.send({ model, localKey, credentialFile, hostToolsEnabled } satisfies BridgeOptions);
-      const [port] = await Promise.race([address, once(child, 'exit', { signal: ready }).then(() => [])]);
-      if (typeof port !== 'number') throw new Error('Model bridge failed to start');
+    const address = once(child, 'message', { signal: ready });
+    child.send({
+      model: { ...model, baseURL: upstreamBaseURL }, localKey, credentialFile, hostToolsEnabled,
+    } satisfies BridgeOptions);
+    const [port] = await Promise.race([address, once(child, 'exit', { signal: ready }).then(() => [])]);
+    if (typeof port !== 'number') throw new Error('Model bridge failed to start');
+    if (directory) {
       await rm(directory, { recursive: true, force: true });
-      return {
-        model: { ...model, baseURL: `http://127.0.0.1:${port}/v1`, apiKey: localKey },
-        async [Symbol.asyncDispose]() {
-          child.kill();
-        },
-      };
-    } catch (error) {
-      child.kill();
-      throw error;
+      directory = undefined;
     }
+    return {
+      model: { ...model, baseURL: `http://127.0.0.1:${port}/v1`, apiKey: localKey },
+      async [Symbol.asyncDispose]() {
+        child?.kill();
+        relay?.close();
+        for (const socket of sockets) socket.destroy();
+        if (directory) await rm(directory, { recursive: true, force: true });
+      },
+    };
+  } catch (error) {
+    child?.kill();
+    relay?.close();
+    for (const socket of sockets) socket.destroy();
+    throw error;
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    if (directory) await rm(directory, { recursive: true, force: true });
   }
 }
 
 async function serveBridge({ model, localKey, credentialFile, hostToolsEnabled }: BridgeOptions): Promise<void> {
-  const { refresh_token: refreshToken } = JSON.parse(await readFile(credentialFile, 'utf8'));
-  await unlink(credentialFile);
-  if (typeof refreshToken !== 'string' || !/^[\w-]{43}$/.test(refreshToken)) throw new Error('Invalid refresh credential');
+  const refreshToken = credentialFile
+    ? JSON.parse(await readFile(credentialFile, 'utf8')).refresh_token
+    : undefined;
+  if (credentialFile) await unlink(credentialFile);
+  if (refreshToken !== undefined && (typeof refreshToken !== 'string' || !/^[\w-]{43}$/.test(refreshToken))) {
+    throw new Error('Invalid refresh credential');
+  }
   const base = model.baseURL.replace(/\/+$/, '');
   const requestLimit = model.inputModalities?.includes('image') ? imageRequestLimit : textRequestLimit;
   let accessToken = model.apiKey;
   let refreshing: Promise<void> | undefined;
 
   async function refreshAccess(): Promise<void> {
+    if (!refreshToken) throw new RefreshRejected(401);
     const response = await fetch(base + '/grants/refresh', {
       method: 'POST', headers: { Authorization: `Bearer ${refreshToken}` }, redirect: 'error', signal: AbortSignal.timeout(10_000),
     });
@@ -94,7 +163,7 @@ async function serveBridge({ model, localKey, credentialFile, hostToolsEnabled }
     accessToken = token;
   }
 
-  const server = createServer(async (request, response) => {
+  const server = createHttpServer(async (request, response) => {
     const hostCall = hostToolsEnabled && request.url === '/tools/call';
     if (request.method !== 'POST' || (!hostCall && request.url !== '/v1/chat/completions') || request.headers.authorization !== `Bearer ${localKey}`) {
       response.writeHead(404).end();
@@ -119,7 +188,7 @@ async function serveBridge({ model, localKey, credentialFile, hostToolsEnabled }
       const sent = accessToken;
       let upstream = await infer(sent);
       // DiOS 的 401 出现在转发前。只重发这一次推理，流式响应和工具不会被重放。
-      if (!hostCall && upstream.status === 401) {
+      if (!hostCall && upstream.status === 401 && refreshToken) {
         await upstream.body?.cancel();
         if (sent === accessToken) {
           refreshing ??= refreshAccess().finally(() => { refreshing = undefined; });
