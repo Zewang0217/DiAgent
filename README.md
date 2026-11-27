@@ -8,7 +8,7 @@ DiAgent 在 Docker 容器中运行智能体任务。本分支使用 TypeScript �
 
 ## Task 结果协议
 
-调度器可设置 `DIAGENT_TASK_PROTOCOL_DIR`，把一次性任务的运行事件写入 `events.ndjson`，并原子发布 `result.json`。结果含协议版本、终态、步数和可选产物清单。产物路径相对于工作区。协议不影响未设置该环境变量时的原有 CLI 文本输出。
+调度器可设置 `DIAGENT_TASK_PROTOCOL_DIR`，把一次性任务的运行事件写入 `events.ndjson`，并原子发布 `result.json`。结果含协议版本、终态、步数和可选产物清单。产物路径相对于工作区。协议不影响未设置该环境变量时的原有 CLI 文本输出。字段定义、环境变量和兼容矩阵见 [Task 协议](docs/task-protocol.md) 与 [运行时兼容性说明](docs/2026-11-task-runtime-compatibility.md)。
 
 本地工具任务可以同时设置 `DIAGENT_TASK_PAUSE_ON_LIMIT=true`。达到步数上限时，Task 在下一次模型请求前停止并返回 `paused` 和 `checkpoint_ref`。调度器须保留同一协议目录及任务工作区，并确保两段不会并发执行。批准后使用原镜像和模型，在相同目录下带 `DIAGENT_TASK_RESUME_SESSION` 启动下一段。该机制从已保存的对话和工具结果继续处理，外部进程不属于检查点范围。
 
